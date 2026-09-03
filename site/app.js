@@ -374,7 +374,9 @@ let qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
 let dashView = "cases";
 let receipt = null, statusResult = null, myReports = [], myReportsError = "", myReportsLoading = true, myReportsLoaded = false;
 let myReportsPromise = null;
-let filters = { q:"", risk:"", cat:"", state:"", handler:"", from:"", to:"", acc:"", dur:"", region:"", district:"" };
+const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", from:"", to:"", acc:"", dur:"", us:"", region:"", district:"", quick:"" });
+let filters = blankDashboardFilters();
+let dashboardData = [];
 // 8/18 call: state changes need a second "save" click before anything is
 // recorded — first click arms the move, second click confirms it.
 let pendingAdvance = null;   // { id, to } while a state move awaits confirmation
@@ -413,7 +415,7 @@ function resetSessionState(){
   qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
   dashView = "cases"; receipt = null; statusResult = null;
   myReports = []; myReportsError = ""; myReportsLoading = true; myReportsLoaded = false; myReportsPromise = null;
-  filters = { q:"", risk:"", cat:"", state:"", handler:"", from:"", to:"", acc:"", dur:"", region:"", district:"" };
+  filters = blankDashboardFilters(); dashboardData = [];
   pendingAdvance = null; showFilters = false; showGuide = false; showReassign = false;
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
   wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"" };
@@ -491,7 +493,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
   toggleTask, evDownload, caseFileDownload,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply,
-  setFilter, applyFilters, toggleFilters, toggleManual, setM, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
+  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleManual, setM, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
   wcOpen, wcClose, wcSave, wcApplyFilters,
   lgOpen, lgClose, lgSave, lgApplyFilters,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
@@ -934,16 +936,149 @@ function renderReceipt(r){
 
 // ---------------- DASHBOARD ----------------
 function setFilter(k,v){ filters[k]=v; }
-function applyFilters(){ filters.q = $("flt-q")?.value ?? filters.q; filters.from = $("flt-from")?.value ?? filters.from; filters.to = $("flt-to")?.value ?? filters.to; render(); }
-// ^ filters.q must be captured HERE: render() paints "Loading…" (wiping #flt-q)
-//   before renderDashboardInto reads it, so reading at render-time gets nothing.
-function toggleFilters(){ showFilters=!showFilters; render(); }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"" }; lgSelected=null; lgFilters={ q:"", state:"Active", risk:"", status:"", type:"" }; filters={ q:"", risk:"", cat:"", state:"", handler:"", from:"", to:"", acc:"", dur:"", region:"", district:"" }; render(); }
+function activeDashboardFilterCount(){
+  return Object.entries(filters).filter(([key,value]) => key === "q" ? String(value).trim() : value).length;
+}
+function filterButtonText(){
+  const n = activeDashboardFilterCount();
+  return `${showFilters?'Hide filters':'Filters'}${n?` (${n})`:''}`;
+}
+function syncDashboardFilterInputs(){
+  const panel = $("dashboard-filters");
+  if (!panel) return;
+  panel.querySelectorAll("[data-filter-key]").forEach(input => { input.value = filters[input.dataset.filterKey] || ""; });
+}
+function toggleFilters(){
+  showFilters = !showFilters;
+  const panel = $("dashboard-filters"), button = $("filter-toggle");
+  if (!panel || !button) return;
+  panel.classList.toggle("is-open", showFilters);
+  panel.setAttribute("aria-hidden", String(!showFilters));
+  panel.inert = !showFilters;
+  button.setAttribute("aria-expanded", String(showFilters));
+  button.textContent = filterButtonText();
+}
+function clearDashboardFilters(){
+  filters = blankDashboardFilters();
+  syncDashboardFilterInputs();
+  updateDashboardResults();
+}
+function clearDashboardFilter(key){
+  if (!Object.prototype.hasOwnProperty.call(filters,key)) return;
+  filters[key] = "";
+  syncDashboardFilterInputs();
+  updateDashboardResults();
+}
+function setDashboardQuickFilter(kind){
+  filters.quick = filters.quick === kind ? "" : kind;
+  updateDashboardResults();
+}
+function applyFilters(){
+  filters.q = $("flt-q")?.value ?? filters.q;
+  filters.from = $("flt-from")?.value ?? filters.from;
+  filters.to = $("flt-to")?.value ?? filters.to;
+  updateDashboardResults();
+}
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"" }; lgSelected=null; lgFilters={ q:"", state:"Active", risk:"", status:"", type:"" }; filters=blankDashboardFilters(); render(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
 // Module-level: also the raw column list for the CSV export.
 const DASH_CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
+const dashboardOverdue = (c, now=Date.now()) => (c.tasks||[]).some(t => t.status==="open" && t.due_at && new Date(t.due_at).getTime() < now);
+const dashboardInvolved = c => (c.case_parties||[]).map(p =>
+  p.party_type==="customer" || (!p.subject_id && p.display_name) ? `${p.display_name||"Customer"} (customer)` : nameOf(p.subject_id)
+).filter(Boolean).join(", ");
+const dashboardLocState = c => c.location ? `${esc(c.location)}${c.us_state?`, ${esc(c.us_state)}`:""}` : (c.us_state?esc(c.us_state):"—");
+function dashboardModel(){
+  const isReq = dashView === "requests";
+  const pool = dashboardData.filter(c => isReq ? c.intake_type === "request" : c.intake_type !== "request");
+  const now = Date.now();
+  const q = filters.q.trim().toLowerCase();
+  const shown = pool.filter(c =>
+    (!filters.quick ||
+      (filters.quick==="open" && c.state!=="Closed") ||
+      (!isReq && filters.quick==="high" && caseRisk(c)==="High") ||
+      (!isReq && filters.quick==="overdue" && dashboardOverdue(c,now))) &&
+    (isReq || !filters.risk || caseRisk(c)===filters.risk) &&
+    (!filters.cat || c.category===filters.cat) &&
+    (!filters.state || c.state===filters.state) &&
+    (!filters.handler || (filters.handler==="__ext" ? c.external : c.handler_id===filters.handler)) &&
+    (!isReq || !filters.acc || (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc)) &&
+    (!isReq || !filters.dur || c.accommodation_duration===filters.dur) &&
+    (!filters.us || c.us_state===filters.us) &&
+    (!filters.region || caseRegion(c)===filters.region) &&
+    (!filters.district || caseDistrict(c)===filters.district) &&
+    (!filters.from || new Date(c.created_at).getTime() >= new Date(filters.from + "T00:00:00").getTime()) &&
+    (!filters.to || new Date(c.created_at).getTime() <= new Date(filters.to + "T23:59:59").getTime()) &&
+    (!q || [c.ref,c.description,c.location,dashboardInvolved(c)].some(v => (v||"").toLowerCase().includes(q)))
+  );
+  return { isReq, pool, shown, now };
+}
+function dashboardFilterChipEntries(){
+  const isReq = dashView === "requests";
+  const quickLabels = isReq
+    ? { open:"Open requests" }
+    : { open:"Open cases", high:"High risk", overdue:"SLA overdue" };
+  const entries = [];
+  if (filters.quick && quickLabels[filters.quick]) entries.push({ key:"quick", label:quickLabels[filters.quick] });
+  if (filters.q.trim()) entries.push({ key:"q", label:`Search: “${filters.q.trim()}”` });
+  const labels = {
+    risk:"Risk", cat:isReq?"Request type":"Category", state:isReq?"Request status":"Status",
+    handler:isReq?"Case owner":"Handler", acc:"Outcome", dur:"Duration", us:"Location state",
+    region:"Region", district:"District", from:"Opened after", to:"Opened before"
+  };
+  for (const key of ["risk","cat","state","handler","acc","dur","us","region","district","from","to"]){
+    if (!filters[key]) continue;
+    let value = filters[key];
+    if (key === "handler") value = value === "__ext" ? "External advisor" : nameOf(value);
+    if (key === "acc" && value === "__none") value = "Not yet decided";
+    if (key === "state") value = stlabel(value);
+    entries.push({ key, label:`${labels[key]}: ${value}` });
+  }
+  return entries;
+}
+function dashboardActiveFiltersHtml(){
+  const entries = dashboardFilterChipEntries();
+  if (!entries.length) return "";
+  return `<span class="active-filter-label">Active filters</span>${entries.map(({key,label}) =>
+    `<button type="button" class="filter-chip" aria-label="Remove ${esc(label)} filter" onclick="clearDashboardFilter('${key}')"><span>${esc(label)}</span><span class="filter-chip-x" aria-hidden="true">×</span></button>`
+  ).join("")}`;
+}
+function dashboardRowsHtml({isReq,shown,now}){
+  if (isReq) return shown.length ? shown.map(c=>`<tr class="clk" onclick="openCase('${c.id}')">
+    <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open request ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td>
+    <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${esc(c.reporter_display||'—')}</td>
+    <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
+    <td>${pill(c.state)}${closureLine(c)}</td><td>${accPill(c.accommodation_status)}</td>
+  </tr>`).join("") : `<tr><td colspan="7" class="empty-row">No requests match these filters.</td></tr>`;
+  return shown.length ? shown.map(c=>`<tr class="clk ${dashboardOverdue(c,now)?'overdue':''}" onclick="openCase('${c.id}')">
+    <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open case ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td><td>${riskPill(caseRisk(c))}</td>
+    <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${dashboardLocState(c)}</td>
+    <td>${c.anonymous?'<span class="chip">Anonymous</span>':esc(c.reporter_display||'Named')}</td><td>${esc(dashboardInvolved(c))||'—'}</td>
+    <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
+    <td>${pill(c.state)}${closureLine(c)}</td><td>${daysOpen(c,now)}</td>
+    <td>${dashboardOverdue(c,now)?'<span class="pill due-over">Overdue</span>':'<span class="pill due-ok">On track</span>'}</td>
+  </tr>`).join("") : `<tr><td colspan="11" class="empty-row">No cases match these filters.</td></tr>`;
+}
+function updateDashboardResults(){
+  const body = $("dashboard-table-body");
+  if (!body) return;
+  const model = dashboardModel();
+  body.innerHTML = dashboardRowsHtml(model);
+  lastShown = model.shown;
+  const result = $("dashboard-result-count");
+  if (result) result.textContent = `Showing ${model.shown.length} of ${model.pool.length} ${model.isReq?'requests':'cases'}`;
+  const activeFilters = $("dashboard-active-filters");
+  if (activeFilters) activeFilters.innerHTML = dashboardActiveFiltersHtml();
+  const toggle = $("filter-toggle");
+  if (toggle) toggle.textContent = filterButtonText();
+  document.querySelectorAll("[data-quick-filter]").forEach(tile => {
+    const active = filters.quick === tile.dataset.quickFilter;
+    tile.classList.toggle("active", active);
+    tile.setAttribute("aria-pressed", String(active));
+  });
+}
 async function renderDashboardInto(el){
   const epoch = sessionEpoch;
   if (dashView === "wc") return renderWcInto(el);
@@ -954,36 +1089,11 @@ async function renderDashboardInto(el){
     .order("created_at",{ascending:false});
   if (epoch !== sessionEpoch || dashView !== dv || !el.isConnected) return;  // view/session changed while loading
   if(error){ el.innerHTML = `<div class="card"><div class="banner err">Could not load cases: ${esc(error.message)}</div></div>`; return; }
-  const isReq = dashView === "requests";
-  const pool = (all||[]).filter(c => isReq ? c.intake_type === "request" : c.intake_type !== "request");
-  const now = Date.now();
-  const overdue = c => (c.tasks||[]).some(t => t.status==="open" && t.due_at && new Date(t.due_at).getTime() < now);
-  // Show who's implicated without requiring the case detail view.
-  const involved = c => (c.case_parties||[]).map(p =>
-      p.party_type==="customer" || (!p.subject_id && p.display_name)
-        ? `${p.display_name||"Customer"} (customer)` : nameOf(p.subject_id)
-    ).filter(Boolean).join(", ");
-  const locState = c => c.location ? `${esc(c.location)}${c.us_state?`, ${esc(c.us_state)}`:""}` : (c.us_state?esc(c.us_state):"—");
-  const q = ($("flt-q")?.value ?? filters.q).toLowerCase();
-  filters.q = q;
-  const fromT = filters.from ? new Date(filters.from + "T00:00:00").getTime() : null;
-  const toT   = filters.to   ? new Date(filters.to   + "T23:59:59").getTime() : null;
-  const shown = pool.filter(c =>
-    (isReq || !filters.risk || caseRisk(c)===filters.risk) &&
-    (!filters.cat  || c.category===filters.cat) &&
-    (!filters.state|| c.state===filters.state) &&
-    (!filters.handler || (filters.handler==="__ext" ? c.external : c.handler_id===filters.handler)) &&
-    (!isReq || !filters.acc || (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc)) &&
-    (!isReq || !filters.dur || c.accommodation_duration===filters.dur) &&
-    (!filters.us || c.us_state===filters.us) &&
-    (!filters.region || caseRegion(c)===filters.region) &&
-    (!filters.district || caseDistrict(c)===filters.district) &&
-    (!fromT || new Date(c.created_at).getTime() >= fromT) &&
-    (!toT   || new Date(c.created_at).getTime() <= toT) &&
-    (!q || (c.ref||"").toLowerCase().includes(q) || (c.description||"").toLowerCase().includes(q) || (c.location||"").toLowerCase().includes(q) || involved(c).toLowerCase().includes(q)));
+  dashboardData = all || [];
+  const { isReq, pool, shown, now } = dashboardModel();
   const open = pool.filter(c=>c.state!=="Closed").length;
   const hi = pool.filter(c=>caseRisk(c)==="High").length;
-  const od = pool.filter(overdue).length;
+  const od = pool.filter(c=>dashboardOverdue(c,now)).length;
   // Filter options come from FIXED lists (plus anything present in the data), so
   // every category/state/team-member is offered even before any case uses it.
   const catOpts = [...new Set([...(isReq?REQUEST_TYPES:CATEGORIES), ...pool.map(c=>c.category)])].filter(Boolean);
@@ -1002,63 +1112,44 @@ async function renderDashboardInto(el){
         </div>
       </div>
       <div class="row" style="margin:18px 0 4px">
-        <div class="stat"><div class="n">${open}</div><div class="l">Open ${isReq?'requests':'cases'}</div></div>
-        ${isReq
-          ? `<div class="stat"><div class="n">${pool.length}</div><div class="l">Total requests</div></div>`
-          : `<div class="stat"><div class="n" style="color:${hi?'var(--danger)':'var(--ok)'}">${hi}</div><div class="l">High risk</div></div>
-             <div class="stat"><div class="n" style="color:${od?'var(--warn)':'var(--ok)'}">${od}</div><div class="l">SLA overdue</div></div>`}
+         <button type="button" class="stat stat-button ${filters.quick==='open'?'active':''}" data-quick-filter="open" aria-pressed="${filters.quick==='open'}" onclick="setDashboardQuickFilter('open')"><div class="n">${open}</div><div class="l">Open ${isReq?'requests':'cases'}</div><div class="stat-hint">Filter table</div></button>
+         ${isReq
+          ? `<button type="button" class="stat stat-button" onclick="clearDashboardFilters()"><div class="n">${pool.length}</div><div class="l">Total requests</div><div class="stat-hint">Show all</div></button>`
+          : `<button type="button" class="stat stat-button ${filters.quick==='high'?'active':''}" data-quick-filter="high" aria-pressed="${filters.quick==='high'}" onclick="setDashboardQuickFilter('high')"><div class="n" style="color:${hi?'var(--danger)':'var(--ok)'}">${hi}</div><div class="l">High risk</div><div class="stat-hint">Filter table</div></button>
+             <button type="button" class="stat stat-button ${filters.quick==='overdue'?'active':''}" data-quick-filter="overdue" aria-pressed="${filters.quick==='overdue'}" onclick="setDashboardQuickFilter('overdue')"><div class="n" style="color:${od?'var(--warn)':'var(--ok)'}">${od}</div><div class="l">SLA overdue</div><div class="stat-hint">Filter table</div></button>`}
       </div>
       <div class="rule"></div>
       <div class="dash-actions">
-        <button class="btn sm ghost" onclick="toggleFilters()">${showFilters?'Hide filters':'Filters'}</button>
+         <button id="filter-toggle" class="btn sm ghost" aria-controls="dashboard-filters" aria-expanded="${showFilters}" onclick="toggleFilters()">${filterButtonText()}</button>
         <button class="btn sm ghost" onclick="exportCasesCsv()">Export CSV</button>
         ${!isReq?`<button class="btn sm sec" style="margin-left:auto" onclick="toggleManual()">${showManual?'Cancel manual entry':(hasManualDraft()?'Resume draft case':'+ Add case manually')}</button>`:""}
       </div>
-      ${showFilters?`<div class="filters">
-        <input id="flt-q" type="text" placeholder="Search ref, description, location…" value="${esc(filters.q)}" onkeydown="if(event.key==='Enter')applyFilters()">
-        ${!isReq?`<select onchange="setFilter('risk',this.value);applyFilters()"><option value="">Risk: all</option>${RISKS.map(r=>`<option ${filters.risk===r?'selected':''}>${r}</option>`).join("")}</select>`:""}
-        <select onchange="setFilter('cat',this.value);applyFilters()"><option value="">${isReq?'Type':'Category'}: all</option>${catOpts.map(c=>`<option ${filters.cat===c?'selected':''}>${esc(c)}</option>`).join("")}</select>
-        <select onchange="setFilter('state',this.value);applyFilters()"><option value="">${isReq?'State':'Status'}: all</option>${stateOpts.map(s=>`<option value="${s}" ${filters.state===s?'selected':''}>${stlabel(s)}</option>`).join("")}</select>
-        ${isReq?`<select onchange="setFilter('acc',this.value);applyFilters()"><option value="">Outcome: all</option>${ACC_STATUS.map(s=>`<option ${filters.acc===s?'selected':''}>${s}</option>`).join("")}<option value="__none" ${filters.acc==='__none'?'selected':''}>Not yet decided</option></select>
-        <select onchange="setFilter('dur',this.value);applyFilters()"><option value="">Duration: all</option>${ACC_DURATION.map(d=>`<option ${filters.dur===d?'selected':''}>${d}</option>`).join("")}</select>`:""}
-        <select onchange="setFilter('handler',this.value);applyFilters()"><option value="">${isReq?'Case owner':'Handler'}: all</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select>
-        <select onchange="setFilter('us',this.value);applyFilters()"><option value="">State: all</option>${statesList.map(s=>`<option ${filters.us===s?'selected':''}>${s}</option>`).join("")}</select>
-        <select onchange="setFilter('region',this.value);applyFilters()"><option value="">Region: all</option>${[...REGIONS,"Other"].map(r=>`<option ${filters.region===r?'selected':''}>${r}</option>`).join("")}</select>
-        <select onchange="setFilter('district',this.value);applyFilters()"><option value="">District: all</option>${[...DISTRICTS,"Other"].map(d=>`<option ${filters.district===d?'selected':''}>${esc(d)}</option>`).join("")}</select>
-        <span class="mini-l" style="margin:0">Opened</span>
-        <input id="flt-from" type="date" value="${esc(filters.from||'')}" onchange="applyFilters()" style="flex:0 1 150px;width:auto">
-        <span class="muted">to</span>
-        <input id="flt-to" type="date" value="${esc(filters.to||'')}" onchange="applyFilters()" style="flex:0 1 150px;width:auto">
-        <button class="btn sm" onclick="applyFilters()">Apply</button>
-      </div>`:""}
+      <div id="dashboard-active-filters" class="active-filter-list" aria-live="polite">${dashboardActiveFiltersHtml()}</div>
+      <div id="dashboard-filters" class="filters filter-panel ${showFilters?'is-open':''}" aria-hidden="${!showFilters}" ${showFilters?'':'inert'}>
+        <div class="filter-panel-head"><div><b>Filter this dashboard</b><div id="dashboard-result-count" class="note-sm">Showing ${shown.length} of ${pool.length} ${isReq?'requests':'cases'}</div></div><button class="btn sm ghost" onclick="clearDashboardFilters()">Clear all</button></div>
+        <div class="filter-grid">
+          <label class="filter-field filter-search"><span>Search</span><input id="flt-q" data-filter-key="q" type="text" placeholder="Ref, description, location, person…" value="${esc(filters.q)}" oninput="applyFilters()"></label>
+          ${!isReq?`<label class="filter-field"><span>Risk</span><select data-filter-key="risk" onchange="setFilter('risk',this.value);applyFilters()"><option value="">All risks</option>${RISKS.map(r=>`<option ${filters.risk===r?'selected':''}>${r}</option>`).join("")}</select></label>`:""}
+          <label class="filter-field"><span>${isReq?'Request type':'Category'}</span><select data-filter-key="cat" onchange="setFilter('cat',this.value);applyFilters()"><option value="">All</option>${catOpts.map(c=>`<option ${filters.cat===c?'selected':''}>${esc(c)}</option>`).join("")}</select></label>
+          <label class="filter-field"><span>${isReq?'Request status':'Status'}</span><select data-filter-key="state" onchange="setFilter('state',this.value);applyFilters()"><option value="">All</option>${stateOpts.map(s=>`<option value="${s}" ${filters.state===s?'selected':''}>${stlabel(s)}</option>`).join("")}</select></label>
+          ${isReq?`<label class="filter-field"><span>Outcome</span><select data-filter-key="acc" onchange="setFilter('acc',this.value);applyFilters()"><option value="">All outcomes</option>${ACC_STATUS.map(s=>`<option ${filters.acc===s?'selected':''}>${s}</option>`).join("")}<option value="__none" ${filters.acc==='__none'?'selected':''}>Not yet decided</option></select></label>
+          <label class="filter-field"><span>Duration</span><select data-filter-key="dur" onchange="setFilter('dur',this.value);applyFilters()"><option value="">All durations</option>${ACC_DURATION.map(d=>`<option ${filters.dur===d?'selected':''}>${d}</option>`).join("")}</select></label>`:""}
+          <label class="filter-field"><span>${isReq?'Case owner':'Handler'}</span><select data-filter-key="handler" onchange="setFilter('handler',this.value);applyFilters()"><option value="">All</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select></label>
+          <label class="filter-field"><span>Location state</span><select data-filter-key="us" onchange="setFilter('us',this.value);applyFilters()"><option value="">All states</option>${statesList.map(s=>`<option ${filters.us===s?'selected':''}>${s}</option>`).join("")}</select></label>
+          <label class="filter-field"><span>Region</span><select data-filter-key="region" onchange="setFilter('region',this.value);applyFilters()"><option value="">All regions</option>${[...REGIONS,"Other"].map(r=>`<option ${filters.region===r?'selected':''}>${r}</option>`).join("")}</select></label>
+          <label class="filter-field"><span>District</span><select data-filter-key="district" onchange="setFilter('district',this.value);applyFilters()"><option value="">All districts</option>${[...DISTRICTS,"Other"].map(d=>`<option ${filters.district===d?'selected':''}>${esc(d)}</option>`).join("")}</select></label>
+          <label class="filter-field"><span>Opened after</span><input id="flt-from" data-filter-key="from" type="date" value="${esc(filters.from||'')}" onchange="applyFilters()"></label>
+          <label class="filter-field"><span>Opened before</span><input id="flt-to" data-filter-key="to" type="date" value="${esc(filters.to||'')}" onchange="applyFilters()"></label>
+        </div>
+      </div>
     </div>
     <div id="manualbox">${showManual&&!isReq?renderManual():""}</div>
-    <div class="card" style="padding:8px 0;overflow-x:auto"><table>
+    <div class="card" style="padding:8px 0;overflow-x:auto"><table id="dashboard-table">
       ${isReq
       ? `<thead><tr><th style="padding-left:20px">Ref</th><th>Request type</th><th>Opened</th><th>Requester</th><th>Case owner</th><th>State</th><th>Outcome</th></tr></thead>
-      <tbody>${shown.length ? shown.map(c=>`<tr class="clk" onclick="openCase('${c.id}')">
-        <td style="padding-left:20px"><span class="ref">${esc(c.ref)}</span></td>
-        <td>${esc(c.category)}</td>
-        <td>${fmtD(c.created_at)}</td>
-        <td>${esc(c.reporter_display||'—')}</td>
-        <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
-        <td>${pill(c.state)}${closureLine(c)}</td>
-        <td>${accPill(c.accommodation_status)}</td>
-      </tr>`).join("") : `<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--grey)">No requests match.</td></tr>`}</tbody>`
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,shown,now})}</tbody>`
       : `<thead><tr><th style="padding-left:20px">Ref</th><th>Risk</th><th>Category</th><th>Opened</th><th>Location</th><th>Reporter</th><th>Involved</th><th>Handler</th><th>Status</th><th>Days open</th><th>SLA</th></tr></thead>
-      <tbody>${shown.length ? shown.map(c=>`<tr class="clk ${overdue(c)?'overdue':''}" onclick="openCase('${c.id}')">
-        <td style="padding-left:20px"><span class="ref">${esc(c.ref)}</span></td>
-        <td>${riskPill(caseRisk(c))}</td>
-        <td>${esc(c.category)}</td>
-        <td>${fmtD(c.created_at)}</td>
-        <td>${locState(c)}</td>
-        <td>${c.anonymous?'<span class="chip">Anonymous</span>':esc(c.reporter_display||'Named')}</td>
-        <td>${esc(involved(c))||'—'}</td>
-        <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
-        <td>${pill(c.state)}${closureLine(c)}</td>
-        <td>${daysOpen(c, now)}</td>
-        <td>${overdue(c)?'<span class="pill due-over">Overdue</span>':'<span class="pill due-ok">On track</span>'}</td>
-      </tr>`).join("") : `<tr><td colspan="11" style="padding:20px;text-align:center;color:var(--grey)">No cases match.</td></tr>`}</tbody>`}
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,shown,now})}</tbody>`}
     </table></div>`;
 }
 // ---------------- WORKERS' COMP TRACKER (source spec, 8/21) -----------------

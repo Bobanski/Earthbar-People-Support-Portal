@@ -196,6 +196,9 @@
   tr.overdue td:first-child{box-shadow:inset 3px 0 0 var(--warn)}
   tr.clk.overdue:hover td{background:rgba(245,165,78,.15)}
   .ref{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.01em;white-space:nowrap}
+  .row-link{appearance:none;border:0;background:transparent;padding:5px 3px;margin:-5px -3px;cursor:pointer;text-align:left}
+  .row-link:hover{text-decoration:underline;text-underline-offset:3px}
+  .row-link:focus-visible{outline:2px solid var(--ink);outline-offset:2px;border-radius:4px}
 
   /* ---- banners ---- */
   .banner{position:relative;border-radius:12px;padding:13px 16px 13px 19px;margin:8px 0;font-size:14px;background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2);line-height:1.5}
@@ -238,6 +241,10 @@
   .stat:hover{border-color:rgba(255,255,255,.3);transform:translateY(-1px)}
   .stat .n{font-family:var(--font-display);font-size:30px;font-weight:800;color:var(--ink);letter-spacing:-.03em;line-height:1.15}
   .stat .l{font-size:10.5px;color:var(--muted);font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-top:4px}
+  .stat-button{appearance:none;text-align:left;font:inherit;color:inherit;cursor:pointer}
+  .stat-button.active{border-color:var(--ink);box-shadow:0 0 0 2px var(--ink),var(--shadow-1);transform:translateY(-1px)}
+  .stat-button.active::before{content:"✓";position:absolute;top:10px;right:12px;z-index:1;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:var(--ink);color:var(--surface);font-size:11px;font-weight:900}
+  .stat-hint{position:relative;z-index:1;margin-top:9px;font-size:10.5px;color:var(--muted);font-weight:650}
 
   /* ---- messages ---- */
   .msgwrap{display:flex;flex-direction:column;gap:6px}
@@ -266,9 +273,25 @@
   .dash-toggle button.on{background:linear-gradient(135deg,#FFFFFF,#CFCFCF);color:var(--on-green);box-shadow:0 4px 14px -6px rgba(255,255,255,.4)}
   .transition-current{display:flex;align-items:center;gap:8px;margin-top:10px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
   .transition-current .mini-l{margin:0}
-  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--bg-2)}
-  .filters input[type=text]{flex:2;min-width:180px;width:auto}
-  .filters select{flex:1;min-width:120px;width:auto}
+  .filters{margin-top:0;padding:0 16px;max-height:0;opacity:0;overflow:hidden;visibility:hidden;pointer-events:none;transform:translateY(-5px);border:1px solid transparent;border-radius:14px;background:var(--bg-2);transition:max-height 260ms var(--ease),opacity var(--t) var(--ease),transform var(--t) var(--ease),margin var(--t) var(--ease),padding var(--t) var(--ease),border-color var(--t) var(--ease)}
+  .filters.is-open{margin-top:14px;padding:16px;max-height:760px;opacity:1;visibility:visible;pointer-events:auto;transform:none;border-color:var(--line)}
+  .filter-panel-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:13px}
+  .filter-panel-head b{font-size:14px}
+  .filter-panel-head .note-sm{margin-top:2px}
+  .filter-grid{display:grid;grid-template-columns:repeat(4,minmax(135px,1fr));gap:11px}
+  .filter-field{min-width:0}
+  .filter-field>span{display:block;margin:0 0 5px;font-size:10.5px;font-weight:750;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  .filter-field input,.filter-field select{width:100%;min-width:0}
+  .filter-search{grid-column:span 2}
+  .empty-row{padding:20px!important;text-align:center;color:var(--grey)}
+  .active-filter-list{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:12px}
+  .active-filter-list:empty{display:none}
+  .active-filter-label{font-size:10.5px;font-weight:750;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin-right:1px}
+  .filter-chip{appearance:none;display:inline-flex;align-items:center;gap:7px;max-width:100%;padding:6px 9px;border:1px solid var(--line-2);border-radius:999px;background:var(--surface-2);color:var(--ink-2);font:inherit;font-size:11.5px;font-weight:650;cursor:pointer}
+  .filter-chip:hover{border-color:var(--ink);background:var(--surface-3)}
+  .filter-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .filter-chip>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .filter-chip-x{font-size:15px;line-height:1;color:var(--muted)}
   .hrnote{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);margin-bottom:8px;font-size:14px;white-space:pre-wrap;color:var(--ink-2)}
   .hrnote .t{font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
   #manualbox .card{box-shadow:var(--glow)}
@@ -310,9 +333,10 @@
     header.top .brand{font-size:19px}
     header.top .brand.bm + .rule{display:none}   /* keep the divider between the two brands, drop the trailing one */
     header.top .sub{order:3;flex:1 0 50%;font-size:10px}
-    /* the tab strip scrolls sideways on phones — fade the right edge so it reads as scrollable, not cut off */
-    nav{-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 44px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 44px),transparent);padding-right:44px}
-    nav::after{content:"→";position:absolute;right:0;top:0;bottom:0;width:40px;padding:10px 10px 0 16px;background:linear-gradient(90deg,transparent,var(--bg) 45%);color:var(--ink);font-size:16px;font-weight:700;text-align:right;pointer-events:none}
+    html{scroll-padding-top:108px}
+    /* Four handler tabs become a clear 2×2 grid; standard users keep a single two-tab row. */
+    nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px;padding:6px 12px;overflow:visible;-webkit-mask-image:none;mask-image:none}
+    nav::after{content:none}
     #userbox{order:4;margin-left:auto}
     #userbox .ub-title{display:none}
     #userbox .ub-name{max-width:52vw}   /* an unbreakable email (handler not in the directory) wraps instead of forcing a 3rd row */
@@ -331,15 +355,20 @@
     /* thumb-sized targets (>=40px) for everything small */
     .btn.sm{padding:11px 14px}
     .dash-toggle button{padding:11px 16px}
-    nav button{padding:11px 14px}
+    nav button{padding:10px 7px;min-height:40px;white-space:normal;line-height:1.2;text-align:center}
     .role-opt{padding:6px 0}
     .role-opt input[type=checkbox]{width:18px;height:18px}
+    .filters.is-open{max-height:1800px}
+    .filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .filter-search{grid-column:1/-1}
   }
   @media (max-width:420px){
     .btn{padding:10px 16px}
     .dash-toggle{flex-wrap:wrap;border-radius:14px}
     .dash-toggle button{flex:1 1 45%}
     .radio-card{min-width:100%}
+    .filter-grid{grid-template-columns:1fr}
+    .filter-search{grid-column:auto}
   }
   @media (prefers-reduced-motion:reduce){
     *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
@@ -405,6 +434,8 @@
   .codebox{background:#FFFFFF;border-color:rgba(17,17,17,.34);color:#111111;box-shadow:inset 0 0 40px rgba(17,17,17,.035)}
   .timeline li::before{box-shadow:0 0 0 3px var(--surface),0 0 10px rgba(17,17,17,.18)}
   .stat::after{background:radial-gradient(closest-side,rgba(17,17,17,.045),transparent)}
+  .stat-button.active{background:#F5F5F2;border-color:#111111;box-shadow:0 0 0 2px #111111,0 12px 28px -18px rgba(17,17,17,.5)}
+  .stat-button.active::before{background:#111111;color:#FFFFFF}
   .msg.handler{background:#111111;color:#FFFFFF;box-shadow:0 8px 20px -10px rgba(17,17,17,.42)}
   .msg.handler .who{color:rgba(255,255,255,.72)}
   .subj-result:hover{border-color:rgba(17,17,17,.38);background:#F3F3F0}
@@ -412,10 +443,6 @@
   .dash-toggle button.on{background:#111111;color:#FFFFFF;box-shadow:0 4px 14px -6px rgba(17,17,17,.42)}
   .filters{background:#FFFFFF}
   .modal{background:var(--surface);border-color:var(--line-2)}
-  @media (max-width:640px){
-    nav::after{background:linear-gradient(90deg,transparent,var(--bg) 45%)}
-  }
-
   /* Light-theme accessibility polish: visible control boundaries and a non-overlapping mobile cue. */
   input[type=text],input[type=date],input[type=number],textarea,select{border-color:rgba(17,17,17,.45)}
   input:hover,textarea:hover,select:hover{border-color:#111111}
