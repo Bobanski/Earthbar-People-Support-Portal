@@ -1,4 +1,4 @@
-// Earthbar HR Case Management — frontend v2 (Supabase; email OTP + Microsoft SSO)
+// Earthbar HR Case Management — frontend v2 (Supabase email OTP)
 // ============================================================================
 // V2 BACKEND CONTRACT — the RPCs this frontend calls (see UPDATE_SPEC.md).
 // Until the v2 migrations are deployed these fail; the UI shows a clear
@@ -29,35 +29,173 @@ import { REGIONS, DISTRICTS, storeOrg } from "./store_org.js";
 import { makeZip } from "./minizip.js";
 
 const cfg = window.EARTHBAR_CONFIG || {};
-// --- SESSION POLICY (2026-08-05) -------------------------------------------
-// HR data is sensitive, so a sign-in is deliberately short-lived:
-//   1. sessionStorage  -> the session dies when the app/browser is CLOSED.
-//   2. 24h idle limit  -> an app left open but unused for 24h forces a new code.
-// Activity resets the 24h clock. NOTE: this is enforced in the browser; the
-// authoritative server-side equivalents (Auth > Sessions > "Time-box user
-// sessions" / "Inactivity timeout") require the Supabase Pro plan.
+// --- SESSION POLICY ---------------------------------------------------------
+// Default: sessionStorage + a 24h idle limit. Verified HR handlers may opt in
+// to an absolute 30-day session on a private device. The 30-day deadline never
+// slides with activity. Supabase's server-side time-box setting requires Pro,
+// so this extra deadline is enforced and cleared in the browser; all database
+// authorization remains server-side on every request.
 const IDLE_LIMIT_MS = 24 * 60 * 60 * 1000;
+const TRUST_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const LAST_SEEN_KEY = "eb_hr_last_seen";
+const PROJECT_REF = (cfg.SUPABASE_URL||"").split("//")[1]?.split(".")[0] || "portal";
+const AUTH_STORAGE_KEY = `sb-${PROJECT_REF}-auth-token`;
+const TRUSTED_DEVICE_KEY = `eb_hr_trusted_device:${PROJECT_REF}`;
+const TRUST_SIGNOUT_PENDING_KEY = `eb_hr_trusted_signout:${PROJECT_REF}`;
+const CROSS_TAB_SIGNOUT_KEY = `eb_hr_cross_tab_signout:${PROJECT_REF}`;
 const ACTIVITY_WRITE_INTERVAL_MS = 30 * 1000;
 const USER_ACTIVITY_EVENTS = ["pointerdown", "click", "keydown", "input", "change", "submit", "wheel"];
 let lastActivityWriteAt = 0;
 let idleSignOutPending = false;
 let idleExpiryTimer = null;
+let trustedExpiryTimer = null;
+let trustedSessionDeadline = 0;
+let stagedAuthValue = null;
+let volatileLastSeenAt = 0;
+let trustedSignOutPendingMemory = false;
+let crossTabSignOutPending = false;
+
+function readTrustedDevice(){
+  try {
+    const marker = localStorage.getItem(TRUSTED_DEVICE_KEY);
+    const record = JSON.parse(marker || "null");
+    if (!record || record.v !== 1 || typeof record.userId !== "string" ||
+        !Number.isFinite(record.until) || record.until <= Date.now()) {
+      if (marker || localStorage.getItem(AUTH_STORAGE_KEY)) stagePersistedSessionForSignOut();
+      return null;
+    }
+    return record;
+  } catch {
+    stagePersistedSessionForSignOut();
+    return null;
+  }
+}
+function stagePersistedSessionForSignOut(){
+  let raw = stagedAuthValue;
+  try { raw = localStorage.getItem(AUTH_STORAGE_KEY) || raw; } catch {}
+  if (raw) {
+    stagedAuthValue = raw;
+    trustedSignOutPendingMemory = true;
+    try { sessionStorage.setItem(AUTH_STORAGE_KEY, raw); sessionStorage.setItem(TRUST_SIGNOUT_PENDING_KEY, "1"); } catch {}
+  }
+  try { localStorage.removeItem(TRUSTED_DEVICE_KEY); localStorage.removeItem(AUTH_STORAGE_KEY); } catch {}
+}
+function clearTrustedDevice(){
+  trustedSessionDeadline = 0;
+  clearTimeout(trustedExpiryTimer); trustedExpiryTimer = null;
+  try { localStorage.removeItem(TRUSTED_DEVICE_KEY); localStorage.removeItem(AUTH_STORAGE_KEY); } catch {}
+}
+function clearAllAuthStorage(){
+  clearTrustedDevice();
+  stagedAuthValue = null;
+  trustedSignOutPendingMemory = false;
+  try { sessionStorage.removeItem(TRUST_SIGNOUT_PENDING_KEY); sessionStorage.removeItem(AUTH_STORAGE_KEY); } catch {}
+}
+function publishCrossTabSignOut(){
+  try { localStorage.setItem(CROSS_TAB_SIGNOUT_KEY, `${Date.now()}:${Math.random()}`); } catch {}
+}
+async function acceptCrossTabSignOut(){
+  if (crossTabSignOutPending) return;
+  crossTabSignOutPending = true;
+  clearAllManualDrafts();
+  resetSessionState();
+  activeUserId = null;
+  session = null;
+  clearAllAuthStorage();
+  render();
+  try { await sb.auth.signOut({ scope:"local" }); } catch {}
+  finally { clearAllAuthStorage(); crossTabSignOutPending = false; }
+}
+function demoteTrustedSession(){
+  let raw = stagedAuthValue;
+  try { raw = localStorage.getItem(AUTH_STORAGE_KEY) || raw; } catch {}
+  if (raw) {
+    stagedAuthValue = raw;
+    try { sessionStorage.setItem(AUTH_STORAGE_KEY, raw); } catch {}
+  }
+  clearTrustedDevice();
+}
+function activateTrustedDevice(authSession){
+  const userId = authSession?.user?.id;
+  if (!userId) return false;
+  const until = Date.now() + TRUST_WINDOW_MS;
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY) || JSON.stringify(authSession);
+    localStorage.setItem(TRUSTED_DEVICE_KEY, JSON.stringify({ v:1, userId, until }));
+    localStorage.setItem(AUTH_STORAGE_KEY, raw);
+    sessionStorage.removeItem(AUTH_STORAGE_KEY);
+    stagedAuthValue = null;
+    trustedSessionDeadline = until;
+    scheduleTrustedExpiry();
+    return true;
+  } catch {
+    clearTrustedDevice();
+    return false;
+  }
+}
+function usingTrustedSession(){
+  return !!session && trustedSessionDeadline > Date.now();
+}
+function syncTrustedDeadlineFromStorage(){
+  const trusted = readTrustedDevice();
+  if (session && trusted?.userId === session.user?.id) {
+    trustedSessionDeadline = trusted.until;
+    clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
+    scheduleTrustedExpiry();
+    return true;
+  }
+  return false;
+}
+function scheduleTrustedExpiry(){
+  clearTimeout(trustedExpiryTimer);
+  if (!trustedSessionDeadline) return;
+  const delay = Math.max(0, trustedSessionDeadline - Date.now()) + 50;
+  // Browsers clamp very long timers. Re-check at least once per day until due.
+  trustedExpiryTimer = setTimeout(() => {
+    trustedExpiryTimer = null;
+    if (trustedSessionDeadline <= Date.now()) void forceSignOut("trusted-expired");
+    else scheduleTrustedExpiry();
+  }, Math.min(delay, 24 * 60 * 60 * 1000));
+}
+const authStorage = {
+  getItem(key){
+    if (key !== AUTH_STORAGE_KEY) { try { return sessionStorage.getItem(key); } catch { return null; } }
+    const trusted = readTrustedDevice();
+    if (trusted) { try { return localStorage.getItem(key); } catch {} }
+    try { return sessionStorage.getItem(key) || stagedAuthValue; } catch { return stagedAuthValue; }
+  },
+  setItem(key, value){
+    if (key !== AUTH_STORAGE_KEY) { try { sessionStorage.setItem(key, value); } catch {} return; }
+    stagedAuthValue = value;
+    if (readTrustedDevice()) {
+      try { localStorage.setItem(key, value); sessionStorage.removeItem(key); }
+      catch { try { sessionStorage.setItem(key, value); } catch {} }
+    } else {
+      try { sessionStorage.setItem(key, value); } catch {}
+      try { localStorage.removeItem(key); } catch {}
+    }
+  },
+  removeItem(key){
+    try { sessionStorage.removeItem(key); } catch {}
+    if (key === AUTH_STORAGE_KEY) {
+      stagedAuthValue = null;
+      try { localStorage.removeItem(key); } catch {}
+    }
+  },
+};
 const sb = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
   auth: {
-    storage: window.sessionStorage,
+    storage: authStorage,
+    storageKey: AUTH_STORAGE_KEY,
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
   },
 });
-// Sessions used to live in localStorage (survived browser close). Purge any
-// leftover token for THIS project so an old long-lived refresh token can't sit
-// on the machine. Other Supabase apps' keys are left alone.
-(function purgeLegacySession(){
+// Old drafts were once stored persistently; keep purging those without deleting
+// a current, explicitly trusted HR session.
+(function purgeLegacyDrafts(){
   try {
-    const ref = (cfg.SUPABASE_URL||"").split("//")[1]?.split(".")[0];
-    if (ref) localStorage.removeItem(`sb-${ref}-auth-token`);
     for(let i=localStorage.length-1;i>=0;i--){
       const key=localStorage.key(i);
       if(key?.startsWith("psp_manual_drafts_v2:")) localStorage.removeItem(key);
@@ -65,8 +203,11 @@ const sb = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
   } catch {}
 })();
 function touchLastSeen(now = Date.now()){
+  if (usingTrustedSession()) return;
   lastActivityWriteAt = now;
-  try { localStorage.setItem(LAST_SEEN_KEY, String(now)); } catch {}
+  volatileLastSeenAt = now;
+  try { localStorage.setItem(LAST_SEEN_KEY, String(now)); }
+  catch { try { sessionStorage.setItem(LAST_SEEN_KEY, String(now)); } catch {} }
   scheduleIdleExpiry(now);
 }
 function scheduleIdleExpiry(lastSeenAt){
@@ -79,12 +220,23 @@ function scheduleIdleExpiry(lastSeenAt){
   }, delay);
 }
 function idleTooLong(){
-  const last = Number(localStorage.getItem(LAST_SEEN_KEY) || 0);
+  let raw = "";
+  try { raw = localStorage.getItem(LAST_SEEN_KEY) || ""; } catch {}
+  if (!raw) { try { raw = sessionStorage.getItem(LAST_SEEN_KEY) || ""; } catch {} }
+  const last = Number(raw || volatileLastSeenAt || 0);
   return !Number.isFinite(last) || last <= 0 || (Date.now() - last) > IDLE_LIMIT_MS;
 }
 async function enforceIdleLimit(){
   if (!session) return false;
   if (idleSignOutPending) return true;
+  if (!trustedSessionDeadline) syncTrustedDeadlineFromStorage();
+  if (trustedSessionDeadline) {
+    if (trustedSessionDeadline > Date.now()) { scheduleTrustedExpiry(); return false; }
+    idleSignOutPending = true;
+    try { await forceSignOut("trusted-expired"); }
+    finally { idleSignOutPending = false; }
+    return true;
+  }
   if (!idleTooLong()) return false;
   idleSignOutPending = true;
   try {
@@ -97,6 +249,11 @@ async function enforceIdleLimit(){
 }
 function recordUserActivity(event){
   if (!event.isTrusted || !session) return;
+  if (!trustedSessionDeadline) syncTrustedDeadlineFromStorage();
+  if (trustedSessionDeadline) {
+    if (trustedSessionDeadline <= Date.now()) void enforceIdleLimit();
+    return;
+  }
   if (idleSignOutPending || idleTooLong()) {
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
@@ -108,16 +265,21 @@ function recordUserActivity(event){
 }
 async function forceSignOut(reason){
   signedOutReason = reason || "";
+  publishCrossTabSignOut();
+  stagePersistedSessionForSignOut();
   try { localStorage.removeItem(LAST_SEEN_KEY); } catch {}
+  try { sessionStorage.removeItem(LAST_SEEN_KEY); } catch {}
+  volatileLastSeenAt = 0;
   lastActivityWriteAt = 0;
   clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
   clearAllManualDrafts();
   resetSessionState();
   activeUserId = null;
-  const remoteSignOut = sb.auth.signOut();
   session = null;
   render();
-  try { await remoteSignOut; } catch {}
+  try { await sb.auth.signOut({ scope:"local" }); }
+  catch {}
+  finally { clearAllAuthStorage(); }
 }
 
 // NOTE (meeting 2026-07-13): harassment/discrimination is deliberately NOT an
@@ -203,10 +365,10 @@ const SLABEL = { UnderReview:"Under Review", OnHold:"On Hold",
 const stlabel = s => SLABEL[s] || s;
 
 // ---- state ----
-let session = null, me = null, isHandler = false, isAdmin = false, signedOutReason = "";
+let session = null, me = null, isHandler = false, isAdmin = false, signedOutReason = "", trustedDeviceNotice = "";
 let dirList = [], dirMap = {}, storeList = [], stateMap = {}, statesList = [];
 let view = "home", selected = null, busy = false, errorMsg = "";
-let auth = { email:"", sent:false, err:"" };
+let auth = { email:"", sent:false, err:"", remember:false };
 let form = blankIncident();
 let qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
 let dashView = "cases";
@@ -229,6 +391,7 @@ let caseExport = null;     // everything fetched for the open case detail (feeds
 let lookup = { query:"", picked:null, result:null, err:"" };
 let evidence = { list:[], err:"" };
 let partySearchResults = [], partySearchSeq = 0, partySearchTimer = null, partySearchError = "";
+let partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
 let evidenceRetry = { caseId:null, files:[] };
 let activeUserId = null, sessionEpoch = 0;
 
@@ -236,12 +399,14 @@ function verifiedEmail(){ return (session?.user?.email || "").trim().toLowerCase
 function canUseDirectorySearch(){ return !!session; }
 function resetSessionState(){
   clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
+  clearTimeout(trustedExpiryTimer); trustedExpiryTimer = null;
+  trustedSessionDeadline = 0;
   clearAllManualDrafts();
   sessionEpoch += 1;
   clearTimeout(partySearchTimer); partySearchTimer = null; partySearchSeq += 1;
   clearTimeout(draftTimer); draftTimer = null;
-  me = null; isHandler = false; isAdmin = false;
-  auth = { email:"", sent:false, err:"" };
+  me = null; isHandler = false; isAdmin = false; trustedDeviceNotice = "";
+  auth = { email:"", sent:false, err:"", remember:false };
   dirList = []; dirMap = {}; storeList = []; stateMap = {}; statesList = []; hrTeam = [];
   view = "home"; selected = null; busy = false; errorMsg = "";
   form = blankIncident();
@@ -258,6 +423,7 @@ function resetSessionState(){
   lookup = { query:"", picked:null, result:null, err:"" };
   evidence = { list:[], err:"" }; evidenceRetry = { caseId:null, files:[] };
   partySearchResults = []; partySearchError = "";
+  partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
 }
 
 function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
@@ -317,6 +483,7 @@ const errText = e => /function|does not exist|not exist|PGRST202|schema cache/i.
   ? "This action needs the v2 backend, which isn't deployed yet." : (e?.message || "Unknown error");
 
 Object.assign(window, { go, sendOtp, verifyOtp, signOut,
+  setRememberDevice,
   setF, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
   setDashView, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
   cancelAdvance,
@@ -330,6 +497,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip,
   saveRisk, savePolicies, uploadCaseEvidence,
+  togglePartyEditor, setPartyEditRole, onPartyEditInput, pickPartyEditEmployee, removePartyEdit, savePartyEdit,
   onLookupInput, pickLookup, backToLookup, retryMyReports, retryEvidenceUploads });
 
 // ---------------- AUTH / BOOTSTRAP ----------------
@@ -337,11 +505,41 @@ async function boot(){
   for (const eventName of USER_ACTIVITY_EVENTS) {
     document.addEventListener(eventName, recordUserActivity, true);
   }
+  window.addEventListener("storage", event => {
+    if (event.key === CROSS_TAB_SIGNOUT_KEY && event.newValue) {
+      void acceptCrossTabSignOut();
+      return;
+    }
+    if (event.key !== TRUSTED_DEVICE_KEY) return;
+    const trusted = readTrustedDevice();
+    if (session && trusted?.userId === session.user?.id) {
+      trustedSessionDeadline = trusted.until;
+      clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
+      scheduleTrustedExpiry();
+    } else if (!trusted) {
+      trustedSessionDeadline = 0;
+      clearTimeout(trustedExpiryTimer); trustedExpiryTimer = null;
+    }
+  });
   const { data } = await sb.auth.getSession();
   session = data.session;
   activeUserId = session?.user?.id || null;
-  // an app left open but untouched for 24h requires a fresh code
-  if (session && idleTooLong()) await forceSignOut("idle");
+  const trusted = readTrustedDevice();
+  let trustedSignOutPending = trustedSignOutPendingMemory;
+  try { trustedSignOutPending = trustedSignOutPending || sessionStorage.getItem(TRUST_SIGNOUT_PENDING_KEY) === "1"; } catch {}
+  if (trustedSignOutPending) {
+    if (session) await forceSignOut("trusted-expired");
+    else { signedOutReason = "trusted-expired"; clearAllAuthStorage(); }
+  } else if (session && trusted && trusted.userId === activeUserId) {
+    trustedSessionDeadline = trusted.until;
+    scheduleTrustedExpiry();
+  } else if (trusted) {
+    // Never let one account inherit another account's device trust.
+    if (session) await forceSignOut("account-changed");
+    else clearTrustedDevice();
+  }
+  // A default session left open but untouched for 24h requires a fresh code.
+  if (session && !trustedSessionDeadline && idleTooLong()) await forceSignOut("idle");
   sb.auth.onAuthStateChange((_e, s) => {
     const nextUserId = s?.user?.id || null;
     if(nextUserId !== activeUserId){
@@ -353,7 +551,7 @@ async function boot(){
     if(s){
       const expected = nextUserId;
       loadContext().then(()=>{ if(session?.user?.id === expected) render(); });
-    } else render();
+    } else { clearAllAuthStorage(); render(); }
   });
   if (session) { touchLastSeen(); await loadContext(); }
   render();
@@ -384,6 +582,12 @@ async function loadContext(){
   }
   if(epoch !== sessionEpoch || session?.user?.id !== userId) return;
   isAdmin = nextIsAdmin; isHandler = nextIsHandler;
+  if (trustedSessionDeadline && !nextIsHandler) {
+    // Remember-device is an HR convenience, not a persistent reporter login.
+    demoteTrustedSession();
+    touchLastSeen();
+    trustedDeviceNotice = "This account is not an HR handler, so it will stay signed in only for this browser session.";
+  }
   dirList = dir;
   dirMap = Object.fromEntries(dirList.map(d => [d.employee_id, d]));
   stateMap = Object.fromEntries((ss||[]).map(r => [r.store, r.us_state]));
@@ -407,20 +611,26 @@ async function sendOtp(){
 async function verifyOtp(){
   const token = ($("otp-code")?.value || "").trim();
   if(!token){ return; }
+  const rememberRequested = !!auth.remember;
   busy = true; render();
-  const { error } = await sb.auth.verifyOtp({ email: auth.email, token, type: "email" });
+  const { data, error } = await sb.auth.verifyOtp({ email: auth.email, token, type: "email" });
+  if(error){ busy = false; auth.err = "That code didn't work — check it or request a new one."; render(); return; }
+  if (rememberRequested) {
+    const handlerCheck = await sb.rpc("app_is_handler");
+    if (handlerCheck.error || !handlerCheck.data) {
+      trustedDeviceNotice = "Remember this device is available only to verified HR handlers; this sign-in will end when the browser closes.";
+    } else if (!activateTrustedDevice(data?.session || session)) {
+      trustedDeviceNotice = "This browser blocked persistent storage, so this sign-in will end when the browser closes.";
+    } else {
+      trustedDeviceNotice = "This private device is remembered for 30 days. Sign out sooner if anyone else may use it.";
+    }
+  }
   busy = false;
-  if(error){ auth.err = "That code didn't work — check it or request a new one."; render(); return; }
-  auth = { email:"", sent:false, err:"" };
+  auth = { email:"", sent:false, err:"", remember:false };
+  render();
 }
 async function signOut(){
-  clearAllManualDrafts();
-  resetSessionState();
-  activeUserId = null;
-  const remoteSignOut = sb.auth.signOut();
-  session = null;
-  render();
-  try { await remoteSignOut; } catch {}
+  await forceSignOut("");
 }
 
 // ---------------- NAV ----------------
@@ -432,7 +642,7 @@ function tabs(){
 function go(v){
   if ((v==="dashboard"||v==="lookup") && !isHandler) v="home";
   if (showManual){ syncManualFields(); flushManualDraft(true); }   // nav closes the form — persist the debounce tail first
-  view=v; selected=null; receipt=null; errorMsg=""; showManual=false;
+  view=v; clearSelectedCaseState(); receipt=null; errorMsg=""; showManual=false;
   if(v==="status"){ myReportsError=""; myReportsLoading=true; myReportsLoaded=false; }
   render();
 }
@@ -454,12 +664,16 @@ function renderLogin(){
   if(!ok) return `<div class="card" style="max-width:520px;margin:40px auto">
     <div class="banner err">Configuration needed: set <b>SUPABASE_URL</b> and <b>SUPABASE_ANON_KEY</b> in <code>config.js</code>. See the README.</div></div>`;
   return `<div class="card" style="max-width:520px;margin:40px auto">
-    ${signedOutReason==="idle"?`<div class="banner warn" style="margin-bottom:14px"><b>You were signed out.</b> For security, sessions end after 24 hours without use. Sign in again to continue.</div>`:""}
+    ${signedOutReason==="idle"?`<div class="banner warn" style="margin-bottom:14px"><b>You were signed out.</b> For security, standard sessions end after 24 hours without use. Sign in again to continue.</div>`:""}
+    ${signedOutReason==="trusted-expired"?`<div class="banner warn" style="margin-bottom:14px"><b>Your 30-day sign-in expired.</b> Enter a new code to continue.</div>`:""}
+    ${signedOutReason==="account-changed"?`<div class="banner warn" style="margin-bottom:14px"><b>The remembered account did not match this session.</b> Sign in again to continue.</div>`:""}
     <h2 class="section">Sign in to the People Support Portal</h2>
     <p class="muted">Enter your email and we'll send you a one-time code. You don't need an @earthbar.com account — any email works.</p>
     ${!auth.sent ? `
       <label>Email address</label>
       <input id="otp-email" type="text" placeholder="you@example.com" value="${esc(auth.email)}">
+      <label class="role-opt" style="margin-top:14px"><input type="checkbox" ${auth.remember?'checked':''} onchange="setRememberDevice(this.checked)"> Remember this private device for 30 days</label>
+      <p class="note-sm" style="margin:5px 0 0 23px">For verified HR handlers only. Leave this off on shared or public devices.</p>
       <div style="margin-top:14px"><button class="btn" onclick="sendOtp()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Sending…':'Email me a sign-in code'}</button></div>`
     : `
       <div class="banner ok">We emailed an 8-digit sign-in code to <b>${esc(auth.email)}</b>. Enter it below. (Check spam if you don't see it.)</div>
@@ -472,14 +686,15 @@ function renderLogin(){
     ${auth.err?`<div class="banner err">${esc(auth.err)}</div>`:""}
     <div class="divider"></div>
     <p class="note-sm">Reported anonymously before? You can check status any time with your claim code after signing in.</p>
-    <p class="note-sm">For security, you'll be asked to sign in again each time you close the app, and after 24 hours without use.</p>
+    <p class="note-sm">Standard sign-ins end when you close the browser and after 24 hours without use. HR handlers who opt in above stay signed in on that device for up to 30 days.</p>
   </div>`;
 }
-window.addEventListener("otp-reset", ()=>{ auth={email:"",sent:false,err:""}; render(); });
+function setRememberDevice(on){ auth.remember = !!on; }
+window.addEventListener("otp-reset", ()=>{ auth={email:"",sent:false,err:"",remember:false}; render(); });
 
 // ---------------- HOME (question vs incident fork) ----------------
 function renderHome(){
-  return `${receipt?`<div style="max-width:720px;margin:24px auto 0">${renderReceipt(receipt)}</div>`:""}
+  return `${trustedDeviceNotice?`<div class="banner ${usingTrustedSession()?'ok':'info'}" style="max-width:720px;margin:24px auto 0">${esc(trustedDeviceNotice)}</div>`:""}${receipt?`<div style="max-width:720px;margin:24px auto 0">${renderReceipt(receipt)}</div>`:""}
   <div class="card" style="max-width:720px;margin:24px auto">
     <h2 class="section">How can HR help?</h2>
     <p class="muted">Choose one to get started.</p>
@@ -1204,8 +1419,13 @@ async function lgSave(){
 // case should be categorized (e.g. "faulty") instead. The delete_case RPC still
 // exists server-side but the dashboard no longer offers it. The "faulty"
 // category itself needs a schema decision (see PR notes).
-function openCase(id){ selected=id; evidence={list:[],err:""}; showReassign=false; showGuide=false; pendingAdvance=null; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function closeCase(){ selected=null; pendingAdvance=null; render(); }
+function clearSelectedCaseState(){
+  selected=null; pendingAdvance=null; showReassign=false; showGuide=false;
+  caseExport=null; caseAllegs=[]; evidence={list:[],err:""};
+  partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
+}
+function openCase(id){ clearSelectedCaseState(); selected=id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
+function closeCase(){ clearSelectedCaseState(); render(); }
 
 // ---- manual case entry (for reports that reach People Support by email) ---
 // Everything typed here is mirrored into `manual` and auto-saved to sessionStorage
@@ -1422,6 +1642,132 @@ async function submitManual(){
 }
 
 // ---- case detail ----
+function partyEditHtml(){
+  if (!partyEditor.open) return "";
+  const q = partyEditor.query.trim().toLowerCase();
+  const results = q.length >= 2 ? dirList.filter(d =>
+    (d.name||"").toLowerCase().includes(q) ||
+    (d.title||"").toLowerCase().includes(q)
+  ).slice(0,8) : [];
+  return `<div class="party-editor">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div style="min-width:190px"><span class="mini-l">Relationship</span>
+        <select onchange="setPartyEditRole(this.value)">
+          <option value="subject" ${partyEditor.role==='subject'?'selected':''}>Implicated person</option>
+          <option value="victim" ${partyEditor.role==='victim'?'selected':''}>Impacted team member</option>
+        </select></div>
+      <div style="flex:1;min-width:220px"><span class="mini-l">Find a team member</span>
+        <input id="party-edit-search" type="text" value="${esc(partyEditor.query)}" placeholder="Search a name or title…" oninput="onPartyEditInput(this.value)"></div>
+    </div>
+    ${results.map(d=>`<div class="subj-result" data-employee-id="${esc(d.employee_id)}" onclick="pickPartyEditEmployee(this)">${esc(d.name)} — <span class="muted">${esc(d.title||'')}${d.store?' · '+esc(d.store):''}</span></div>`).join("")}
+    <div style="margin-top:10px">${partyEditor.parties.map((p,i)=>`<span class="chip" style="margin:0 6px 6px 0">${esc(nameOf(p.id))} · <i>${esc(rlabel(p.role_in_case))}</i> <a onclick="removePartyEdit(${i})" style="cursor:pointer;color:var(--red);font-weight:700">×</a></span>`).join("") || '<span class="muted">No implicated or impacted employees selected.</span>'}</div>
+    <p class="note-sm">Witnesses, reporters, and customer entries are preserved and are not changed by this editor.</p>
+    ${partyEditor.err?`<div class="banner err">${esc(partyEditor.err)}</div>`:""}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn sm" onclick="savePartyEdit()" ${partyEditor.busy?'disabled':''}>${partyEditor.busy?'<span class="spin"></span> Saving…':'Save team members'}</button>
+      <button class="btn sm ghost" onclick="togglePartyEditor()" ${partyEditor.busy?'disabled':''}>Cancel</button>
+    </div>
+  </div>`;
+}
+function renderPartyEditorInto(){
+  const el = $("party-editor");
+  if (!el) return;
+  el.innerHTML = partyEditHtml();
+}
+function togglePartyEditor(){
+  if (partyEditor.open) {
+    partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
+  } else if (caseExport?.c) {
+    partyEditor = {
+      open:true, caseId:caseExport.c.id, expectedUpdatedAt:caseExport.c.updated_at,
+      parties:(caseExport.parties||[])
+        .filter(p=>coalescePartyType(p)==="employee" && ["subject","victim"].includes(p.role_in_case) && p.subject_id)
+        .map(p=>({id:p.subject_id,role_in_case:p.role_in_case})),
+      query:"", role:"subject", busy:false, err:""
+    };
+  }
+  renderPartyEditorInto();
+  const toggle=$("party-editor-toggle");
+  if(toggle) toggle.textContent=partyEditor.open ? "Close editor" : "Edit team members";
+}
+function coalescePartyType(p){ return p.party_type || (p.subject_id ? "employee" : "customer"); }
+function partyLineHtml(p){
+  return p.party_type==="customer" || (!p.subject_id && p.display_name)
+    ? `${esc(p.display_name||"Customer")} (customer, ${esc(rlabel(p.role_in_case))})`
+    : `${esc(nameOf(p.subject_id))} (${esc(roleOf(p.subject_id))}${p.role_in_case&&p.role_in_case!=='subject'?', '+esc(rlabel(p.role_in_case)):''})`;
+}
+function setPartyEditRole(role){ if(["subject","victim"].includes(role)) partyEditor.role=role; }
+function onPartyEditInput(value){
+  partyEditor.query=value; partyEditor.err=""; renderPartyEditorInto();
+  const el=$("party-edit-search"); if(el){ el.focus(); el.setSelectionRange(value.length,value.length); }
+}
+function pickPartyEditEmployee(el){
+  const id=el?.dataset?.employeeId || "";
+  if(!id || !dirMap[id]) return;
+  if(partyEditor.parties.some(p=>p.id===id && p.role_in_case===partyEditor.role)){
+    partyEditor.err="That team member already has this relationship.";
+  } else {
+    partyEditor.parties.push({id,role_in_case:partyEditor.role});
+    partyEditor.query=""; partyEditor.err="";
+  }
+  renderPartyEditorInto();
+}
+function removePartyEdit(index){ partyEditor.parties.splice(index,1); partyEditor.err=""; renderPartyEditorInto(); }
+async function savePartyEdit(){
+  if(!partyEditor.open || partyEditor.busy) return;
+  const epoch=sessionEpoch, caseId=partyEditor.caseId;
+  const editedParties=partyEditor.parties.map(p=>({
+    id:`edited-${p.id}-${p.role_in_case}`, case_id:caseId, subject_id:p.id,
+    party_type:"employee", display_name:null, role_in_case:p.role_in_case
+  }));
+  partyEditor.busy=true; partyEditor.err=""; renderPartyEditorInto();
+  const { data, error } = await sb.rpc("update_case_team_members", {
+    p_case_id:caseId,
+    p_expected_updated_at:partyEditor.expectedUpdatedAt,
+    p_parties:partyEditor.parties
+  });
+  if(epoch !== sessionEpoch) return;
+  if(error){
+    if(/not authorized/i.test(error.message||"")){
+      lastShown=[];
+      clearSelectedCaseState();
+      alert("Your access to this case changed. Returning to the dashboard.");
+      render();
+      return;
+    }
+    partyEditor.busy=false; partyEditor.err=errText(error); renderPartyEditorInto(); return;
+  }
+  if(caseExport?.c?.id===caseId){
+    const preserved=(caseExport.parties||[]).filter(p=>
+      !(coalescePartyType(p)==="employee" && ["subject","victim"].includes(p.role_in_case))
+    );
+    caseExport.parties=[...preserved,...editedParties];
+    Object.assign(caseExport.c, {
+      handler_id:data?.handler_id ?? caseExport.c.handler_id,
+      external:data?.external ?? caseExport.c.external,
+      route_reason:data?.route_reason ?? caseExport.c.route_reason,
+      updated_at:data?.updated_at ?? caseExport.c.updated_at,
+    });
+    caseExport.handlerName=caseExport.c.external ? "External advisor" : nameOf(caseExport.c.handler_id);
+  }
+  partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
+  if(data?.access_retained===false){
+    lastShown=[];
+    clearSelectedCaseState();
+    alert("Team members updated. This case was rerouted because of a conflict and is no longer available to you.");
+    render();
+    return;
+  }
+  const summary=$("party-summary");
+  if(summary) summary.innerHTML=(caseExport?.parties||[]).map(partyLineHtml).join(", ")||"—";
+  const handler=$("case-handler-summary");
+  if(handler) handler.innerHTML=`<b>${esc(caseExport?.handlerName||"—")}</b>${caseExport?.c?.external?' <span class="warnbadge">EXTERNAL</span>':''}`;
+  const route=$("case-route-reason");
+  if(route) route.textContent=(caseExport?.c?.route_reason||"").replace(/_/g," ");
+  renderPartyEditorInto();
+  const toggle=$("party-editor-toggle"); if(toggle) toggle.textContent="Edit team members";
+}
+
 async function renderCaseDetailInto(el, id){
   const epoch = sessionEpoch;
   const CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
@@ -1460,9 +1806,6 @@ async function renderCaseDetailInto(el, id){
     : (c.state==="Closed" ? ["Reopened"] : INCIDENT_STATES.filter(s=>s!==c.state));
   const canClose = c.state !== "Closed";
   const now = Date.now();
-  const partyLine = p => p.party_type==="customer" || (!p.subject_id && p.display_name)
-      ? `${esc(p.display_name||"Customer")} (customer, ${esc(rlabel(p.role_in_case))})`
-      : `${esc(nameOf(p.subject_id))} (${esc(roleOf(p.subject_id))}${p.role_in_case&&p.role_in_case!=='subject'?', '+esc(rlabel(p.role_in_case)):''})`;
   el.innerHTML = `<button class="back" onclick="closeCase()">← Back to dashboard</button>
   <div class="card">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="ref" style="font-size:16px">${esc(c.ref)}</span>${pill(c.state)}${riskPill(caseRisk(c))}${isReq&&c.accommodation_status?accPill(c.accommodation_status):''}${!isReq&&c.substantiated===true?'<span class="chip">Substantiated</span>':!isReq&&c.substantiated===false?'<span class="chip soft">Unsubstantiated</span>':''}${c.closure_category?`<span class="chip">Closure: ${esc(c.closure_category)}${c.closure_ref?' → '+esc(c.closure_ref):''}</span>`:''}
@@ -1474,15 +1817,16 @@ async function renderCaseDetailInto(el, id){
         <div class="kv"><span class="k">Location</span><span>${esc(c.location||'—')}</span></div>
         ${!isReq?`<div class="kv"><span class="k">Occurred</span><span>${c.incident_date?esc(c.incident_date):'—'}</span></div>
         <div class="kv"><span class="k">Relationship</span><span>${esc(c.reporter_relationship||'—')}${c.reporter_role?' · '+esc(c.reporter_role):''}</span></div>
-        <div class="kv"><span class="k">Involved</span><span>${(parties||[]).map(partyLine).join(", ")||'—'}</span></div>`:""}
-        <div class="kv"><span class="k">${L(c,'handler')}</span><b>${esc(handlerName)}</b>${c.external?' <span class="warnbadge">EXTERNAL</span>':''}
+        <div class="kv"><span class="k">Involved</span><span id="party-summary">${(parties||[]).map(partyLineHtml).join(", ")||'—'}</span> <button id="party-editor-toggle" class="btn sm ghost" style="margin-left:8px" onclick="togglePartyEditor()">${partyEditor.open?'Close editor':'Edit team members'}</button></div>
+        <div id="party-editor">${partyEditor.open&&partyEditor.caseId===c.id?partyEditHtml():''}</div>`:""}
+        <div class="kv"><span class="k">${L(c,'handler')}</span><span id="case-handler-summary"><b>${esc(handlerName)}</b>${c.external?' <span class="warnbadge">EXTERNAL</span>':''}</span>
           <button class="btn sm ghost" style="margin-left:8px" onclick="toggleReassign()">${showReassign?'Cancel':'Reassign'}</button></div>
         ${showReassign?`<div class="reassign">
           <select id="ra-to">${hrTeam.filter(t=>t.employee_id!==c.handler_id).map(t=>`<option value="${esc(t.employee_id)}">${esc(nameOf(t.employee_id))}</option>`).join("")}</select>
           <input id="ra-why" type="text" placeholder="Reason (optional)">
           <button class="btn sm" onclick="doReassign('${c.id}')">Confirm reassignment</button>
         </div>`:""}
-        <div class="kv"><span class="k">Route reason</span><span>${esc((c.route_reason||'').replace(/_/g,' '))}</span></div>
+        <div class="kv"><span class="k">Route reason</span><span id="case-route-reason">${esc((c.route_reason||'').replace(/_/g,' '))}</span></div>
         <div class="kv"><span class="k">${L(c,'risk')}</span><span>
           <select id="risk-sel" style="width:auto;padding:5px 34px 5px 8px">${["",...RISKS].map(r=>`<option value="${r}" ${caseRisk(c)===r?'selected':''}>${r||'— unset —'}</option>`).join("")}</select>
           <button class="btn sm sec" onclick="saveRisk('${c.id}')">Save</button></span></div>
@@ -2168,7 +2512,7 @@ ${sec("Messages", `<p class="muted">${messages.length} message(s) — full threa
 </body></html>`;
 }
 function exportCaseZip(){
-  if(!caseExport){ alert("Open a case first."); return; }
+  if(!caseExport || !selected || caseExport.c?.id !== selected){ alert("Open a case first."); return; }
   const { c } = caseExport;
   const zip = makeZip([
     { name: "summary.html", data: caseSummaryHtml() },
