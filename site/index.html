@@ -105,7 +105,7 @@
   .note-sm{font-size:12.5px;color:var(--muted);margin-top:6px;line-height:1.45}
 
   /* ---- inputs ---- */
-  input[type=text],input[type=date],input[type=number],textarea,select{width:100%;padding:11px 13px;border:1px solid var(--line-2);border-radius:10px;
+  input[type=text],input[type=email],input[type=date],input[type=number],input[type=search],textarea,select{width:100%;padding:11px 13px;border:1px solid var(--line-2);border-radius:10px;
     font:inherit;font-size:14px;background-color:var(--surface-2);color:var(--ink);
     transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease),background-color var(--t) var(--ease)}
   input:hover,textarea:hover,select:hover{border-color:rgba(255,255,255,.28)}
@@ -233,6 +233,19 @@
     text-transform:uppercase;letter-spacing:.08em;transition:color var(--t) var(--ease),transform var(--t) var(--ease)}
   .back:hover{color:var(--ink);transform:translateX(-2px)}
 
+  /* ---- sign in ---- */
+  .login-card{max-width:500px;margin:clamp(24px,6vh,64px) auto;padding:32px}
+  .login-mark{width:44px;height:44px;display:grid;place-items:center;margin-bottom:18px;border-radius:13px;background:var(--ink);color:var(--surface);font-family:var(--font-display);font-weight:850;letter-spacing:-.03em}
+  .login-eyebrow{margin:0 0 5px;color:var(--muted);font-size:10.5px;font-weight:750;letter-spacing:.1em;text-transform:uppercase}
+  .login-card h2.section{margin-bottom:8px}
+  .login-lede{margin:0 0 22px;color:var(--ink-2);font-size:15px;line-height:1.55}
+  .login-remember{margin-top:17px!important}
+  .login-help{margin:6px 0 0 26px;color:var(--muted);font-size:12px;line-height:1.5}
+  #otp-help{margin-left:0}
+  .login-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+  .login-security{margin:24px 0 0;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.55}
+  .otp-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:22px;font-weight:750;letter-spacing:.24em;font-variant-numeric:tabular-nums}
+
   /* ---- stat tiles ---- */
   .stat{flex:1;min-width:150px;background:var(--surface-2);border:1px solid var(--line);border-radius:14px;padding:16px 18px;position:relative;overflow:hidden;
     transition:border-color var(--t) var(--ease),transform var(--t) var(--ease)}
@@ -292,6 +305,8 @@
   .filter-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
   .filter-chip>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .filter-chip-x{font-size:15px;line-height:1;color:var(--muted)}
+  .tracker-filter-head{margin-top:16px}
+  .mobile-form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
   .hrnote{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);margin-bottom:8px;font-size:14px;white-space:pre-wrap;color:var(--ink-2)}
   .hrnote .t{font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
   #manualbox .card{box-shadow:var(--glow)}
@@ -327,6 +342,11 @@
   @keyframes pop{from{opacity:0;transform:translateY(8px) scale(.98)}}
 
   /* ---- responsive ---- */
+  /* iOS Safari auto-zooms focused form controls below 16px. Cover phone
+     landscape widths and touch devices without disabling user zoom. */
+  @media (max-width:1024px),(hover:none) and (pointer:coarse){
+    input[type=text],input[type=email],input[type=date],input[type=number],input[type=search],textarea,select{font-size:16px}
+  }
   @media (max-width:640px){
     /* two rows: [earthbar | beaming]  /  [PEOPLE SUPPORT PORTAL ........ name · Sign out] */
     header.top{padding:12px 16px;gap:10px 12px;flex-wrap:wrap}
@@ -344,6 +364,13 @@
     .card{padding:18px 16px;border-radius:14px}
     h2.section{font-size:18px}
     .stat{min-width:calc(50% - 9px)}
+    .dashboard-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .dashboard-stats .stat{width:100%;min-width:0;padding:14px}
+    .dashboard-stats>.stat:last-child:nth-child(odd){grid-column:1/-1}
+    .dashboard-stats .stat .n{font-size:25px}
+    .login-card{margin:8px auto;padding:24px 20px}
+    .login-actions .btn{flex:1 1 145px}
+    .mobile-form-actions .btn{flex:1}
     .kv .k{width:100px}
     .msg{max-width:92%}
     table{font-size:13px} td,th{padding:10px 8px}
@@ -367,6 +394,12 @@
     .dash-toggle{flex-wrap:wrap;border-radius:14px}
     .dash-toggle button{flex:1 1 45%}
     .radio-card{min-width:100%}
+    .filter-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 8px}
+    .filter-search{grid-column:1/-1}
+    .tracker-filter-head{align-items:flex-start}
+    .tracker-filter-head .btn{white-space:nowrap}
+  }
+  @media (max-width:340px){
     .filter-grid{grid-template-columns:1fr}
     .filter-search{grid-column:auto}
   }
@@ -444,7 +477,7 @@
   .filters{background:#FFFFFF}
   .modal{background:var(--surface);border-color:var(--line-2)}
   /* Light-theme accessibility polish: visible control boundaries and a non-overlapping mobile cue. */
-  input[type=text],input[type=date],input[type=number],textarea,select{border-color:rgba(17,17,17,.45)}
+  input[type=text],input[type=email],input[type=date],input[type=number],input[type=search],textarea,select{border-color:rgba(17,17,17,.45)}
   input:hover,textarea:hover,select:hover{border-color:#111111}
   select{background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23666666' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>")}
   @media (max-width:640px){

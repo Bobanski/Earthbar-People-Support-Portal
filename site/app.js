@@ -26,12 +26,13 @@
 // ============================================================================
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.115.0/+esm";
 import { REGIONS, DISTRICTS, storeOrg } from "./store_org.js";
+import { STORE_LOCATIONS } from "./store_locations.js";
 import { makeZip } from "./minizip.js";
 
 const cfg = window.EARTHBAR_CONFIG || {};
 // --- SESSION POLICY ---------------------------------------------------------
-// Default: sessionStorage + a 24h idle limit. Verified HR handlers may opt in
-// to an absolute 30-day session on a private device. The 30-day deadline never
+// Default: sessionStorage + a 24h idle limit. Any signed-in user may opt in to
+// an absolute 30-day session on their device. The 30-day deadline never
 // slides with activity. Supabase's server-side time-box setting requires Pro,
 // so this extra deadline is enforced and cleared in the browser; all database
 // authorization remains server-side on every request.
@@ -105,15 +106,6 @@ async function acceptCrossTabSignOut(){
   render();
   try { await sb.auth.signOut({ scope:"local" }); } catch {}
   finally { clearAllAuthStorage(); crossTabSignOutPending = false; }
-}
-function demoteTrustedSession(){
-  let raw = stagedAuthValue;
-  try { raw = localStorage.getItem(AUTH_STORAGE_KEY) || raw; } catch {}
-  if (raw) {
-    stagedAuthValue = raw;
-    try { sessionStorage.setItem(AUTH_STORAGE_KEY, raw); } catch {}
-  }
-  clearTrustedDevice();
 }
 function activateTrustedDevice(authSession){
   const userId = authSession?.user?.id;
@@ -384,9 +376,11 @@ let showFilters = false, showGuide = false, showReassign = false;
 let hrTeam = [];
 let showManual = false, manual = blankIncident(true);
 let wcSelected = null;      // null = list; "new" = create form; else wc_cases.id
-let wcFilters = { q:"", status:"", state:"", asg:"" };
+let wcFilters = { q:"", status:"", state:"", asg:"", quick:"" };
+let wcData = [];
 let lgSelected = null;      // null = list; "new" = create form; else legal_cases.id
-let lgFilters = { q:"", state:"Active", risk:"", status:"", type:"" };   // Active by default (spec)
+let lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" };   // Active by default (spec)
+let legalData = [];
 let closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
 let lastShown = [];        // rows currently visible on the cases/requests dashboard (feeds Export CSV)
 let caseExport = null;     // everything fetched for the open case detail (feeds Export case .zip)
@@ -418,8 +412,8 @@ function resetSessionState(){
   filters = blankDashboardFilters(); dashboardData = [];
   pendingAdvance = null; showFilters = false; showGuide = false; showReassign = false;
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
-  wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"" };
-  lgSelected = null; lgFilters = { q:"", state:"Active", risk:"", status:"", type:"" };
+  wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = [];
+  lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = [];
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
   lookup = { query:"", picked:null, result:null, err:"" };
@@ -435,23 +429,30 @@ function blankIncident(isManual = false){
     pRoles:["subject"], description:"", email:"", phone:"", files:[], manual:isManual,
     incidentDate: todayStr() };
 }
-// Location dropdown grouped by state; if a state is chosen, only its stores show.
-function locationOptions(selected, chosenState){
-  const groups = {};
-  for (const s of storeList){
-    const st = stateMap[s] || "Other";
-    if (chosenState && st !== chosenState) continue;
-    (groups[st] = groups[st] || []).push(s);
-  }
-  let html = `<option value="">— Select a location —</option>`;
-  for (const st of Object.keys(groups).sort()){
-    html += `<optgroup label="${esc(st)}">` +
-      groups[st].map(s=>`<option value="${esc(s)}" ${selected===s?'selected':''}>${esc(s)}</option>`).join("") +
-      `</optgroup>`;
-  }
-  html += `<option value="Other / not store-specific" ${selected==='Other / not store-specific'?'selected':''}>Other / not store-specific</option>`;
-  return html;
+const OTHER_LOCATION = "Other / not store-specific";
+const REFERENCE_STATE_MAP = Object.fromEntries(STORE_LOCATIONS.map(location => [location.name, location.state]));
+function locationPicker(id, selected, inputHandler, optional = false){
+  const listId = `${id}-options`;
+  const helpId = `${id}-help`;
+  return `<input id="${id}" class="location-search" type="search" list="${listId}"
+    value="${esc(selected)}" placeholder="Search by city or location name…" autocomplete="off"
+    inputmode="search" autocapitalize="words" spellcheck="false" aria-describedby="${helpId}"
+    oninput="${inputHandler}(this.value)">
+    <datalist id="${listId}">
+      ${storeList.map(name=>`<option value="${esc(name)}" label="${esc(stateMap[name]||'')}"></option>`).join("")}
+      <option value="${OTHER_LOCATION}"></option>
+    </datalist>
+    <p id="${helpId}" class="note-sm location-search-help">Start typing to search by city or location name${optional?", or leave blank if it isn't store-specific":""}.</p>`;
 }
+function canonicalLocation(value, required = false){
+  const raw = String(value || "").trim();
+  if (!raw) return required ? null : "";
+  if (raw.toLowerCase() === OTHER_LOCATION.toLowerCase()) return OTHER_LOCATION;
+  return storeList.find(name => name.toLowerCase() === raw.toLowerCase()) || null;
+}
+const locationError = required => required
+  ? `Please choose a location from the search results, or select “${OTHER_LOCATION}”.`
+  : "Please choose a valid location from the search results or clear the field.";
 
 const $ = id => document.getElementById(id);
 const esc = s => (s==null?"":String(s)).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
@@ -486,16 +487,16 @@ const errText = e => /function|does not exist|not exist|PGRST202|schema cache/i.
 
 Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setRememberDevice,
-  setF, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
+  setF, setIncidentLocation, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
   setDashView, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
   toggleTask, evDownload, caseFileDownload,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply,
-  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleManual, setM, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
-  wcOpen, wcClose, wcSave, wcApplyFilters,
-  lgOpen, lgClose, lgSave, lgApplyFilters,
+  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
+  wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
+  lgOpen, lgClose, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip,
   saveRisk, savePolicies, uploadCaseEvidence,
@@ -584,16 +585,16 @@ async function loadContext(){
   }
   if(epoch !== sessionEpoch || session?.user?.id !== userId) return;
   isAdmin = nextIsAdmin; isHandler = nextIsHandler;
-  if (trustedSessionDeadline && !nextIsHandler) {
-    // Remember-device is an HR convenience, not a persistent reporter login.
-    demoteTrustedSession();
-    touchLastSeen();
-    trustedDeviceNotice = "This account is not an HR handler, so it will stay signed in only for this browser session.";
-  }
   dirList = dir;
   dirMap = Object.fromEntries(dirList.map(d => [d.employee_id, d]));
-  stateMap = Object.fromEntries((ss||[]).map(r => [r.store, r.us_state]));
-  storeList = [...new Set((ss||[]).map(r => r.store).filter(Boolean))].sort();
+  const databaseStateMap = Object.fromEntries((ss||[])
+    .filter(row => row.store && row.us_state)
+    .map(row => [row.store, row.us_state]));
+  stateMap = { ...REFERENCE_STATE_MAP, ...databaseStateMap };
+  storeList = [...new Set([
+    ...STORE_LOCATIONS.map(location => location.name),
+    ...(ss||[]).map(row => row.store).filter(Boolean),
+  ])].sort((a, b) => a.localeCompare(b));
   statesList = [...new Set(Object.values(stateMap))].sort();
   me = dirList.find(d => (d.email||"").toLowerCase() === email) || { name: session.user.user_metadata?.name || email, title:null, email };
   hrTeam = nextTeam;
@@ -612,19 +613,16 @@ async function sendOtp(){
 }
 async function verifyOtp(){
   const token = ($("otp-code")?.value || "").trim();
-  if(!token){ return; }
+  if(!/^\d{6}$/.test(token)){ auth.err = "Enter the 6-digit code from your email."; render(); return; }
   const rememberRequested = !!auth.remember;
   busy = true; render();
   const { data, error } = await sb.auth.verifyOtp({ email: auth.email, token, type: "email" });
-  if(error){ busy = false; auth.err = "That code didn't work — check it or request a new one."; render(); return; }
+  if(error){ busy = false; auth.err = "That code didn't work. Check the code and try again."; render(); return; }
   if (rememberRequested) {
-    const handlerCheck = await sb.rpc("app_is_handler");
-    if (handlerCheck.error || !handlerCheck.data) {
-      trustedDeviceNotice = "Remember this device is available only to verified HR handlers; this sign-in will end when the browser closes.";
-    } else if (!activateTrustedDevice(data?.session || session)) {
+    if (!activateTrustedDevice(data?.session || session)) {
       trustedDeviceNotice = "This browser blocked persistent storage, so this sign-in will end when the browser closes.";
     } else {
-      trustedDeviceNotice = "This private device is remembered for 30 days. Sign out sooner if anyone else may use it.";
+      trustedDeviceNotice = "This device will keep you logged in for up to 30 days. Sign out sooner if anyone else may use it.";
     }
   }
   busy = false;
@@ -663,32 +661,32 @@ function renderUserBox(){
 // ---------------- LOGIN (email one-time code — the only sign-in method) --------
 function renderLogin(){
   const ok = cfg.SUPABASE_URL && !cfg.SUPABASE_URL.includes("YOUR-PROJECT");
-  if(!ok) return `<div class="card" style="max-width:520px;margin:40px auto">
+  if(!ok) return `<div class="card login-card">
     <div class="banner err">Configuration needed: set <b>SUPABASE_URL</b> and <b>SUPABASE_ANON_KEY</b> in <code>config.js</code>. See the README.</div></div>`;
-  return `<div class="card" style="max-width:520px;margin:40px auto">
+  return `<div class="card login-card">
     ${signedOutReason==="idle"?`<div class="banner warn" style="margin-bottom:14px"><b>You were signed out.</b> For security, standard sessions end after 24 hours without use. Sign in again to continue.</div>`:""}
     ${signedOutReason==="trusted-expired"?`<div class="banner warn" style="margin-bottom:14px"><b>Your 30-day sign-in expired.</b> Enter a new code to continue.</div>`:""}
     ${signedOutReason==="account-changed"?`<div class="banner warn" style="margin-bottom:14px"><b>The remembered account did not match this session.</b> Sign in again to continue.</div>`:""}
-    <h2 class="section">Sign in to the People Support Portal</h2>
-    <p class="muted">Enter your email and we'll send you a one-time code. You don't need an @earthbar.com account — any email works.</p>
+    <div class="login-mark" aria-hidden="true">PS</div>
+    <p class="login-eyebrow">People Support Portal</p>
+    <h2 class="section">${auth.sent?'Check your email':'Welcome'}</h2>
+    <p class="login-lede">${auth.sent?`Enter the code sent to <b>${esc(auth.email)}</b>.`:`We'll email you a secure sign-in code. Use the address where you want to receive it.`}</p>
     ${!auth.sent ? `
-      <label>Email address</label>
-      <input id="otp-email" type="text" placeholder="you@example.com" value="${esc(auth.email)}">
-      <label class="role-opt" style="margin-top:14px"><input type="checkbox" ${auth.remember?'checked':''} onchange="setRememberDevice(this.checked)"> Remember this private device for 30 days</label>
-      <p class="note-sm" style="margin:5px 0 0 23px">For verified HR handlers only. Leave this off on shared or public devices.</p>
-      <div style="margin-top:14px"><button class="btn" onclick="sendOtp()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Sending…':'Email me a sign-in code'}</button></div>`
+      <label for="otp-email">Email address</label>
+      <input id="otp-email" type="email" placeholder="you@example.com" autocomplete="email" value="${esc(auth.email)}" onkeydown="if(event.key==='Enter')sendOtp()">
+      <label class="role-opt login-remember"><input type="checkbox" ${auth.remember?'checked':''} onchange="setRememberDevice(this.checked)"> Keep me logged in on this device</label>
+      <p class="login-help">Use this only on a private device. It keeps you signed in for up to 30 days.</p>
+      <div class="login-actions"><button class="btn" onclick="sendOtp()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Sending…':'Continue'}</button></div>`
     : `
-      <div class="banner ok">We emailed an 8-digit sign-in code to <b>${esc(auth.email)}</b>. Enter it below. (Check spam if you don't see it.)</div>
-      <label>8-digit code</label>
-      <input id="otp-code" type="text" placeholder="8-digit code" autocomplete="one-time-code" inputmode="numeric">
-      <div style="margin-top:14px;display:flex;gap:8px">
+      <label for="otp-code">6-digit code</label>
+      <input id="otp-code" class="otp-code" type="text" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" aria-describedby="otp-help" oninput="this.value=this.value.replace(/\D/g,'').slice(0,6)" onkeydown="if(event.key==='Enter')verifyOtp()">
+      <p id="otp-help" class="login-help">The code expires soon and can only be used once. Check your spam folder if it hasn't arrived.</p>
+      <div class="login-actions">
         <button class="btn" onclick="verifyOtp()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Checking…':'Sign in'}</button>
-        <button class="btn ghost" onclick="(function(){window.dispatchEvent(new Event('otp-reset'))})()" id="otp-back">Use a different email</button>
+        <button class="btn ghost" onclick="(function(){window.dispatchEvent(new Event('otp-reset'))})()" id="otp-back">Change email</button>
       </div>`}
     ${auth.err?`<div class="banner err">${esc(auth.err)}</div>`:""}
-    <div class="divider"></div>
-    <p class="note-sm">Reported anonymously before? You can check status any time with your claim code after signing in.</p>
-    <p class="note-sm">Standard sign-ins end when you close the browser and after 24 hours without use. HR handlers who opt in above stay signed in on that device for up to 30 days.</p>
+    <p class="login-security">Looking for a report you submitted? Sign in, then choose <b>Check my report status</b>.</p>
   </div>`;
 }
 function setRememberDevice(on){ auth.remember = !!on; }
@@ -716,8 +714,8 @@ function renderRequest(){
     <h2 class="section">Make a request to HR</h2>
     <label>What type of request is it?</label>
     <select onchange="qformType(this.value)">${REQUEST_TYPES.map(t=>`<option ${qform.rtype===t?'selected':''}>${t}</option>`).join("")}</select>
-    <label>Location (optional)</label>
-    <select onchange="qformLoc(this.value)">${["",...storeList].map(s=>`<option value="${esc(s)}" ${qform.location===s?'selected':''}>${s||'— Not store-specific —'}</option>`).join("")}</select>
+    <label for="q-location">Location (optional)</label>
+    ${locationPicker("q-location", qform.location, "qformLoc", true)}
     <label>Your request</label>
     <textarea id="qbody" placeholder="Describe what you're requesting.">${esc(qform.body)}</textarea>
     <label>Verified sign-in email</label>
@@ -731,7 +729,11 @@ window.qformType = v => { qform.rtype = v; };
 async function submitRequest(){
   const epoch = sessionEpoch;
   qform.body = $("qbody")?.value || ""; qform.email = verifiedEmail();
+  qform.location = $("q-location")?.value ?? qform.location;
   errorMsg = "";
+  const chosenLocation = canonicalLocation(qform.location);
+  if(chosenLocation === null){ errorMsg=locationError(false); render(); return; }
+  qform.location = chosenLocation;
   if(!qform.body.trim()){ errorMsg="Please describe your request."; render(); return; }
   if(!/^\S+@\S+\.\S+$/.test(qform.email)){ errorMsg="Please enter a valid email for the reply."; render(); return; }
   busy=true; render();
@@ -740,7 +742,8 @@ async function submitRequest(){
     ({ data, error } = await sb.rpc("submit_case_v2", {
       p_intake_type:"request", p_category:qform.rtype, p_description:qform.body,
       p_anonymous:false, p_location:qform.location||null, p_relationship:null, p_role:null,
-      p_contact_email:qform.email, p_contact_phone:null, p_parties:[], p_manual:false, p_incident_date:null }));
+      p_contact_email:qform.email, p_contact_phone:null, p_parties:[], p_manual:false, p_incident_date:null,
+      p_us_state:stateMap[qform.location]||null }));
   } catch(e) { error = e; }
   if(epoch !== sessionEpoch) return;
   busy=false;
@@ -787,10 +790,8 @@ function renderIncident(){
     <h2 class="section">Report an incident</h2>
     <p class="muted">Only the assigned HR handler can see this — never anyone the report is about.</p>
 
-    <label>Which state is this about?</label>
-    <select onchange="setF('usState',this.value);setF('location','')">${["",...statesList].map(s=>`<option value="${esc(s)}" ${form.usState===s?'selected':''}>${s||'— Select a state —'}</option>`).join("")}</select>
-    <label>Which location is this about?</label>
-    <select onchange="setF('location',this.value)">${locationOptions(form.location, form.usState)}</select>
+    <label for="f-location">Which location is this about?</label>
+    ${locationPicker("f-location", form.location, "setIncidentLocation")}
 
     <label>When did this happen?</label>
     <input type="date" max="${todayStr()}" value="${esc(form.incidentDate)}" onchange="setF('incidentDate',this.value||todayStr(),true)">
@@ -827,11 +828,20 @@ function renderIncident(){
     <label>Your phone <span class="muted" style="font-weight:400">(optional)</span></label>
     <input id="f-phone" type="text" value="${esc(form.phone)}" oninput="setF('phone',this.value,true)">
 
-    ${errorMsg?`<div class="banner err">${esc(errorMsg)}</div>`:""}
-    <div style="margin-top:18px"><button class="btn" onclick="submitIncident()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Submitting…':'Submit report'}</button></div>
+    <div id="incident-error" aria-live="polite">${errorMsg?`<div class="banner err">${esc(errorMsg)}</div>`:""}</div>
+    <div style="margin-top:18px"><button id="incident-submit" class="btn" onclick="submitIncident()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Submitting…':'Submit report'}</button></div>
   </div>${receipt?renderReceipt(receipt):""}`;
 }
+function paintIncidentStatus(){
+  const errorBox = $("incident-error"), submitButton = $("incident-submit");
+  if(errorBox) errorBox.innerHTML = errorMsg ? `<div class="banner err">${esc(errorMsg)}</div>` : "";
+  if(submitButton){
+    submitButton.disabled = busy;
+    submitButton.innerHTML = busy ? '<span class="spin"></span> Submitting…' : 'Submit report';
+  }
+}
 function setF(k,v,silent){ form[k]=v; if(!silent) render(); }
+function setIncidentLocation(value){ form.location=value; form.usState=stateMap[value]||""; }
 function onPartyInput(v){
   form.pQuery=v; partySearchResults=[]; partySearchError=""; render();
   let el=$("psearch"); if(el){el.focus();el.setSelectionRange(v.length,v.length);}
@@ -882,12 +892,15 @@ async function submitIncident(){
   form.description = $("f-desc")?.value ?? form.description ?? "";
   form.email = verifiedEmail(); form.phone = (($("f-phone")?.value ?? form.phone)||"").trim();
   form.role = form.relationship==="Employee" ? ($("f-role")?.value||form.role||"") : "";
+  form.location = $("f-location")?.value ?? form.location;
   const files = Array.from($("f-files")?.files || []);
-  errorMsg="";
-  if(!form.location){ errorMsg="Please choose a location."; render(); return; }
-  if(!form.description.trim()){ errorMsg="Please describe what happened."; render(); return; }
-  if(!/^\S+@\S+\.\S+$/.test(form.email)){ errorMsg="An email is required so we can confirm your report and send updates (it's hidden from HR if you're anonymous)."; render(); return; }
-  busy=true; render();
+  errorMsg=""; paintIncidentStatus();
+  const chosenLocation = canonicalLocation(form.location, true);
+  if(!chosenLocation){ errorMsg=locationError(true); paintIncidentStatus(); return; }
+  form.location = chosenLocation; form.usState = stateMap[chosenLocation] || "";
+  if(!form.description.trim()){ errorMsg="Please describe what happened."; paintIncidentStatus(); return; }
+  if(!/^\S+@\S+\.\S+$/.test(form.email)){ errorMsg="An email is required so we can confirm your report and send updates (it's hidden from HR if you're anonymous)."; paintIncidentStatus(); return; }
+  busy=true; paintIncidentStatus();
   let data, error;
   try {
     ({ data, error } = await sb.rpc("submit_case_v2", {
@@ -897,7 +910,7 @@ async function submitIncident(){
       p_parties:form.parties, p_manual:false, p_incident_date:form.incidentDate, p_us_state:form.usState||null }));
   } catch(e) { error = e; }
   if(epoch !== sessionEpoch) return;
-  if(error){ busy=false; errorMsg = errText(error); render(); return; }
+  if(error){ busy=false; errorMsg = errText(error); paintIncidentStatus(); return; }
   // upload evidence after the case exists
   let upNote = "";
   evidenceRetry = { caseId:data?.case_id || null, files:[] };
@@ -979,7 +992,7 @@ function applyFilters(){
   filters.to = $("flt-to")?.value ?? filters.to;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"" }; lgSelected=null; lgFilters={ q:"", state:"Active", risk:"", status:"", type:"" }; filters=blankDashboardFilters(); render(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; filters=blankDashboardFilters(); render(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1111,7 +1124,7 @@ async function renderDashboardInto(el){
           <button onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
-      <div class="row" style="margin:18px 0 4px">
+      <div class="row dashboard-stats" style="margin:18px 0 4px">
          <button type="button" class="stat stat-button ${filters.quick==='open'?'active':''}" data-quick-filter="open" aria-pressed="${filters.quick==='open'}" onclick="setDashboardQuickFilter('open')"><div class="n">${open}</div><div class="l">Open ${isReq?'requests':'cases'}</div><div class="stat-hint">Filter table</div></button>
          ${isReq
           ? `<button type="button" class="stat stat-button" onclick="clearDashboardFilters()"><div class="n">${pool.length}</div><div class="l">Total requests</div><div class="stat-hint">Show all</div></button>`
@@ -1166,16 +1179,78 @@ const wcFollowUpDue = w => w.next_follow_up && !WC_DEAD.includes(w.claim_status)
   && new Date(String(w.next_follow_up).slice(0,10)+"T00:00:00") <= new Date();
 const wcPill = s => !s ? '<span class="muted">—</span>'
   : `<span class="pill ${s==="Closed"?"due-ok":(s==="Litigation"||s==="Denied"?"due-over":"dot")}">${esc(s)}</span>`;
-// Filters live in module state, NOT read from the DOM at render time — render()
-// paints "Loading…" (wiping the inputs) before renderWcInto runs. Same lesson
-// as applyFilters/#flt-q above.
+function trackerChipsHtml(entries, clearFn){
+  if (!entries.length) return "";
+  return `<span class="active-filter-label">Active filters</span>${entries.map(({key,label}) =>
+    `<button type="button" class="filter-chip" aria-label="Remove ${esc(label)} filter" onclick="${clearFn}('${key}')"><span>${esc(label)}</span><span class="filter-chip-x" aria-hidden="true">×</span></button>`
+  ).join("")}`;
+}
+function wcModel(){
+  const q = wcFilters.q.trim().toLowerCase();
+  const shown = wcData.filter(w =>
+    (!wcFilters.status || w.claim_status === wcFilters.status) &&
+    (!wcFilters.asg || w.assigned_to === wcFilters.asg) &&
+    (!wcFilters.state || w.us_state === wcFilters.state) &&
+    (!wcFilters.quick ||
+      (wcFilters.quick === "open" && !WC_DEAD.includes(w.claim_status)) ||
+      (wcFilters.quick === "legal" && (w.claim_status === "Litigation" || w.legal_escalation === "Yes")) ||
+      (wcFilters.quick === "due" && wcFollowUpDue(w)) ||
+      (wcFilters.quick === "osha" && w.osha_recordable === "Yes")) &&
+    (!q || [w.ref, w.employee_name, w.claim_number, w.injury_description, w.location]
+      .some(v => (v||"").toLowerCase().includes(q))));
+  return { rows:wcData, shown, todayS:todayStr() };
+}
+function wcRowsHtml({shown,todayS}){
+  return shown.length ? shown.map(w=>{
+    const dOpen = wcDays(w.date_reported || (w.created_at||"").slice(0,10), w.date_closed || todayS);
+    return `<tr class="clk ${wcFollowUpDue(w)?'overdue':''}" onclick="wcOpen('${esc(w.id)}')">
+      <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open claim ${esc(w.ref)}" onclick="event.stopPropagation();wcOpen('${esc(w.id)}')">${esc(w.ref)}</button>${w.legal_escalation==='Yes'?' <span class="warnbadge">LEGAL</span>':''}</td>
+      <td>${esc(w.employee_name)}</td>
+      <td>${esc(w.location||'—')}${w.us_state?`, ${esc(w.us_state)}`:''}</td>
+      <td>${w.date_of_injury?fmtDateOnly(w.date_of_injury):'—'}${w.date_reported?` <span class="muted" style="font-size:11px">rpt ${fmtDateOnly(w.date_reported)}</span>`:''}</td>
+      <td>${esc(w.body_part||'—')}</td><td>${esc(w.claim_type||'—')}</td><td>${wcPill(w.claim_status)}</td>
+      <td>${esc(w.work_status||'—')}</td><td>${w.total_incurred ? '$'+Number(w.total_incurred).toLocaleString() : '$0'}</td>
+      <td>${esc(w.assigned_to||'—')}</td>
+      <td>${w.next_follow_up ? (wcFollowUpDue(w)?`<span class="pill due-over">${fmtDateOnly(w.next_follow_up)}</span>`:fmtDateOnly(w.next_follow_up)) : '—'}</td>
+      <td>${dOpen==null?'—':dOpen}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="12" class="empty-row">No claims match these filters.</td></tr>`;
+}
+function wcFilterChipsHtml(){
+  const quick = {open:"Open claims",legal:"Legal / litigation",due:"Follow-ups due",osha:"OSHA recordable"};
+  const entries = [];
+  if (wcFilters.quick) entries.push({key:"quick",label:quick[wcFilters.quick]});
+  if (wcFilters.q.trim()) entries.push({key:"q",label:`Search: “${wcFilters.q.trim()}”`});
+  if (wcFilters.status) entries.push({key:"status",label:`Status: ${wcFilters.status}`});
+  if (wcFilters.state) entries.push({key:"state",label:`State: ${wcFilters.state}`});
+  if (wcFilters.asg) entries.push({key:"asg",label:`Assigned: ${wcFilters.asg}`});
+  return trackerChipsHtml(entries,"clearWcFilter");
+}
+function syncWcFilterInputs(){
+  [["wc-q","q"],["wc-f-status","status"],["wc-f-state","state"],["wc-f-asg","asg"]].forEach(([id,key])=>{ if ($(id)) $(id).value=wcFilters[key]; });
+}
+function updateWcResults(){
+  const model = wcModel();
+  if ($("wc-table-body")) $("wc-table-body").innerHTML = wcRowsHtml(model);
+  if ($("wc-result-count")) $("wc-result-count").textContent = `Showing ${model.shown.length} of ${model.rows.length} claims`;
+  if ($("wc-active-filters")) $("wc-active-filters").innerHTML = wcFilterChipsHtml();
+  document.querySelectorAll("[data-wc-quick-filter]").forEach(tile=>{
+    const active = wcFilters.quick === tile.dataset.wcQuickFilter;
+    tile.classList.toggle("active",active); tile.setAttribute("aria-pressed",String(active));
+  });
+}
+// Filter interactions repaint the cached rows only. This avoids a loading flash,
+// an unnecessary network request, and loss of unsaved editor fields.
 function wcApplyFilters(){
   wcFilters.q      = $("wc-q")?.value        ?? wcFilters.q;
   wcFilters.status = $("wc-f-status")?.value ?? wcFilters.status;
   wcFilters.state  = $("wc-f-state")?.value  ?? wcFilters.state;
   wcFilters.asg    = $("wc-f-asg")?.value    ?? wcFilters.asg;
-  render();
+  updateWcResults();
 }
+function setWcQuickFilter(kind){ wcFilters.quick = wcFilters.quick === kind ? "" : kind; updateWcResults(); }
+function clearWcFilter(key){ if (!(key in wcFilters)) return; wcFilters[key]=""; syncWcFilterInputs(); updateWcResults(); }
+function clearWcFilters(){ wcFilters={q:"",status:"",state:"",asg:"",quick:""}; syncWcFilterInputs(); updateWcResults(); }
 async function renderWcInto(el){
   const epoch = sessionEpoch;
   const dv = dashView;                       // stale-paint guard (QC 8/31)
@@ -1186,20 +1261,14 @@ async function renderWcInto(el){
       ? "The Workers' Comp backend (migration 016) isn't deployed yet." : error.message;
     el.innerHTML = `<div class="card"><div class="banner err">${esc(msg)}</div></div>`; return;
   }
-  const todayS = todayStr();
-  const rows = list || [];
+  wcData = list || [];
+  const rows = wcData;
   const openN = rows.filter(w => !WC_DEAD.includes(w.claim_status)).length;
   const litN = rows.filter(w => w.claim_status === "Litigation" || w.legal_escalation === "Yes").length;
   const fuN = rows.filter(wcFollowUpDue).length;
   const oshaN = rows.filter(w => w.osha_recordable === "Yes").length;
   const incurred = rows.reduce((s,w)=>s+(Number(w.total_incurred)||0),0);
-  const q = wcFilters.q.toLowerCase();
-  const shown = rows.filter(w =>
-    (!wcFilters.status || w.claim_status === wcFilters.status) &&
-    (!wcFilters.asg || w.assigned_to === wcFilters.asg) &&
-    (!wcFilters.state || w.us_state === wcFilters.state) &&
-    (!q || [w.ref, w.employee_name, w.claim_number, w.injury_description, w.location]
-        .some(v => (v||"").toLowerCase().includes(q))));
+  const model = wcModel();
   // A stale selection (row no longer present) must not render as a "new" form —
   // saving it would target the missing id. Drop back to the list instead.
   if (wcSelected && wcSelected !== "new" && !rows.some(w => w.id === wcSelected)) wcSelected = null;
@@ -1214,41 +1283,27 @@ async function renderWcInto(el){
           <button onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
-      <div class="row" style="margin:18px 0 4px">
-        <div class="stat"><div class="n">${openN}</div><div class="l">Open claims</div></div>
-        <div class="stat"><div class="n" style="color:${litN?'var(--danger)':'var(--ok)'}">${litN}</div><div class="l">Legal / litigation</div></div>
-        <div class="stat"><div class="n" style="color:${fuN?'var(--warn)':'var(--ok)'}">${fuN}</div><div class="l">Follow-ups due</div></div>
-        <div class="stat"><div class="n">${oshaN}</div><div class="l">OSHA recordable</div></div>
-        <div class="stat"><div class="n">$${incurred.toLocaleString()}</div><div class="l">Total incurred</div></div>
+      <div class="row dashboard-stats" style="margin:18px 0 4px">
+        <button type="button" class="stat stat-button ${wcFilters.quick==='open'?'active':''}" data-wc-quick-filter="open" aria-pressed="${wcFilters.quick==='open'}" onclick="setWcQuickFilter('open')"><div class="n">${openN}</div><div class="l">Open claims</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${wcFilters.quick==='legal'?'active':''}" data-wc-quick-filter="legal" aria-pressed="${wcFilters.quick==='legal'}" onclick="setWcQuickFilter('legal')"><div class="n" style="color:${litN?'var(--danger)':'var(--ok)'}">${litN}</div><div class="l">Legal / litigation</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${wcFilters.quick==='due'?'active':''}" data-wc-quick-filter="due" aria-pressed="${wcFilters.quick==='due'}" onclick="setWcQuickFilter('due')"><div class="n" style="color:${fuN?'var(--warn)':'var(--ok)'}">${fuN}</div><div class="l">Follow-ups due</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${wcFilters.quick==='osha'?'active':''}" data-wc-quick-filter="osha" aria-pressed="${wcFilters.quick==='osha'}" onclick="setWcQuickFilter('osha')"><div class="n">${oshaN}</div><div class="l">OSHA recordable</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button" onclick="clearWcFilters()"><div class="n">$${incurred.toLocaleString()}</div><div class="l">Total incurred</div><div class="stat-hint">Show all</div></button>
       </div>
       <div class="rule"></div>
-      <div class="dash-actions" style="gap:8px;flex-wrap:wrap">
-        <input id="wc-q" type="text" placeholder="Search ref, employee, claim #…" value="${esc(wcFilters.q)}" onkeydown="if(event.key==='Enter')wcApplyFilters()" style="flex:1 1 220px">
-        <select id="wc-f-status" onchange="wcApplyFilters()"><option value="">Status: all</option>${WC_CLAIM_STATUS.map(s=>`<option ${wcFilters.status===s?'selected':''}>${s}</option>`).join("")}</select>
-        <select id="wc-f-state" onchange="wcApplyFilters()"><option value="">State: all</option>${WC_STATES.map(s=>`<option ${wcFilters.state===s?'selected':''}>${s}</option>`).join("")}</select>
-        <select id="wc-f-asg" onchange="wcApplyFilters()"><option value="">Assigned: all</option>${WC_ASSIGNEES.map(s=>`<option ${wcFilters.asg===s?'selected':''}>${s}</option>`).join("")}</select>
-        <button class="btn sm sec" style="margin-left:auto" onclick="wcOpen('new')">+ New claim</button>
+      <div class="filter-panel-head tracker-filter-head"><div><b>Filter claims</b><div id="wc-result-count" class="note-sm">Showing ${model.shown.length} of ${model.rows.length} claims</div></div><button class="btn sm sec" onclick="wcOpen('new')">+ New claim</button></div>
+      <div class="filter-grid tracker-filter-grid">
+        <label class="filter-field filter-search"><span>Search</span><input id="wc-q" type="text" placeholder="Ref, employee, claim number…" value="${esc(wcFilters.q)}" oninput="wcApplyFilters()"></label>
+        <label class="filter-field"><span>Status</span><select id="wc-f-status" onchange="wcApplyFilters()"><option value="">All statuses</option>${WC_CLAIM_STATUS.map(s=>`<option ${wcFilters.status===s?'selected':''}>${s}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>State</span><select id="wc-f-state" onchange="wcApplyFilters()"><option value="">All states</option>${WC_STATES.map(s=>`<option ${wcFilters.state===s?'selected':''}>${s}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>Assigned to</span><select id="wc-f-asg" onchange="wcApplyFilters()"><option value="">Anyone</option>${WC_ASSIGNEES.map(s=>`<option ${wcFilters.asg===s?'selected':''}>${s}</option>`).join("")}</select></label>
       </div>
+      <div id="wc-active-filters" class="active-filter-list" aria-live="polite">${wcFilterChipsHtml()}</div>
     </div>
     ${wcSelected ? wcEditor(sel) : ""}
     <div class="card" style="padding:8px 0;overflow-x:auto"><table>
       <thead><tr><th style="padding-left:20px">Case ID</th><th>Employee</th><th>Location</th><th>Injury / Reported</th><th>Body part</th><th>Claim type</th><th>Status</th><th>Work status</th><th>Incurred</th><th>Assigned</th><th>Next follow-up</th><th>Days open</th></tr></thead>
-      <tbody>${shown.length ? shown.map(w=>{
-        const dOpen = wcDays(w.date_reported || (w.created_at||"").slice(0,10), w.date_closed || todayS);
-        return `<tr class="clk ${wcFollowUpDue(w)?'overdue':''}" onclick="wcOpen('${esc(w.id)}')">
-        <td style="padding-left:20px"><span class="ref">${esc(w.ref)}</span>${w.legal_escalation==='Yes'?' <span class="warnbadge">LEGAL</span>':''}</td>
-        <td>${esc(w.employee_name)}</td>
-        <td>${esc(w.location||'—')}${w.us_state?`, ${esc(w.us_state)}`:''}</td>
-        <td>${w.date_of_injury?fmtDateOnly(w.date_of_injury):'—'}${w.date_reported?` <span class="muted" style="font-size:11px">rpt ${fmtDateOnly(w.date_reported)}</span>`:''}</td>
-        <td>${esc(w.body_part||'—')}</td>
-        <td>${esc(w.claim_type||'—')}</td>
-        <td>${wcPill(w.claim_status)}</td>
-        <td>${esc(w.work_status||'—')}</td>
-        <td>${w.total_incurred ? '$'+Number(w.total_incurred).toLocaleString() : '$0'}</td>
-        <td>${esc(w.assigned_to||'—')}</td>
-        <td>${w.next_follow_up ? (wcFollowUpDue(w)?`<span class="pill due-over">${fmtDateOnly(w.next_follow_up)}</span>`:fmtDateOnly(w.next_follow_up)) : '—'}</td>
-        <td>${dOpen==null?'—':dOpen}</td>
-      </tr>`;}).join("") : `<tr><td colspan="12" style="padding:20px;text-align:center;color:var(--grey)">No claims match.</td></tr>`}</tbody>
+      <tbody id="wc-table-body">${wcRowsHtml(model)}</tbody>
     </table></div>`;
 }
 function wcEditor(w){
@@ -1314,6 +1369,7 @@ function wcEditor(w){
     </div>
     <div><label>Case notes</label><textarea id="wc-case_notes" rows="3">${v('case_notes')}</textarea></div>
     <div id="wc-err"></div>
+    <div class="mobile-form-actions"><button class="btn ghost" onclick="wcClose()">Cancel</button><button class="btn" onclick="wcSave()">${w?"Save changes":"Create claim"}</button></div>
   </div>`;
 }
 function wcOpen(id){ wcSelected = id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
@@ -1351,17 +1407,68 @@ function lgDocsCell(v){
   if (!urls) return `<span class="muted">${esc(v)}</span>`;
   return urls.map((u,i)=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">Folder${urls.length>1?" "+(i+1):""}</a>`).join(", ");
 }
-// Filters live in module state, NOT read from the DOM at render time — render()
-// paints "Loading…" (wiping the inputs) before renderLegalInto runs. Same
-// lesson as applyFilters/#flt-q and wcApplyFilters.
+function legalModel(){
+  const q = lgFilters.q.trim().toLowerCase();
+  const shown = legalData.filter(r =>
+    (!lgFilters.state  || r.case_state === lgFilters.state) &&
+    (!lgFilters.risk   || r.risk_level === lgFilters.risk) &&
+    (!lgFilters.status || r.status === lgFilters.status) &&
+    (!lgFilters.type   || r.claim_type === lgFilters.type) &&
+    (!lgFilters.quick ||
+      (lgFilters.quick === "active" && r.case_state === "Active") ||
+      (lgFilters.quick === "high" && r.case_state === "Active" && r.risk_level === "High") ||
+      (lgFilters.quick === "litigation" && r.case_state === "Active" && r.status === "Litigation") ||
+      (lgFilters.quick === "due" && lgDue(r))) &&
+    (!q || [r.ref, r.complainant, r.opposing_counsel, r.company_counsel, r.eb_point,
+      r.synopsis, r.pending_action, r.epli_notes, r.notes].some(v => (v||"").toLowerCase().includes(q))));
+  return { rows:legalData, shown };
+}
+function legalRowsHtml({shown}){
+  return shown.length ? shown.map(r=>`<tr class="clk ${lgDue(r)?'overdue':''}" onclick="lgOpen('${esc(r.id)}')">
+    <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open legal case ${esc(r.ref)}" onclick="event.stopPropagation();lgOpen('${esc(r.id)}')">${esc(r.ref)}</button>${r.case_state==='Completed'?' <span class="chip">Completed</span>':''}</td>
+    <td>${riskPill(r.risk_level)}</td><td>${lgStatusPill(r.status)}</td><td>${esc(r.complainant||'—')}</td>
+    <td>${esc(r.claim_type||'—')}</td><td>${esc(r.opposing_counsel||'—')}</td><td>${esc(r.company_counsel||'—')}</td><td>${esc(r.eb_point||'—')}</td>
+    <td>${r.due_date ? (lgDue(r)?`<span class="pill due-over">${fmtDateOnly(r.due_date)}</span>`:fmtDateOnly(r.due_date)) : (r.due_date_note?`<span class="muted">${esc(r.due_date_note)}</span>`:'—')}</td>
+    <td onclick="event.stopPropagation()">${lgDocsCell(r.docs_link)}</td>
+  </tr>`).join("") : `<tr><td colspan="10" class="empty-row">No legal cases match these filters.</td></tr>`;
+}
+function legalFilterChipsHtml(){
+  const quick = {active:"Active cases",high:"High risk",litigation:"In litigation",due:"Due follow-ups"};
+  const entries = [];
+  if (lgFilters.quick) entries.push({key:"quick",label:quick[lgFilters.quick]});
+  if (lgFilters.q.trim()) entries.push({key:"q",label:`Search: “${lgFilters.q.trim()}”`});
+  if (lgFilters.state) entries.push({key:"state",label:`Case state: ${lgFilters.state}`});
+  if (lgFilters.risk) entries.push({key:"risk",label:`Risk: ${lgFilters.risk}`});
+  if (lgFilters.status) entries.push({key:"status",label:`Status: ${lgFilters.status}`});
+  if (lgFilters.type) entries.push({key:"type",label:`Type: ${lgFilters.type}`});
+  return trackerChipsHtml(entries,"clearLegalFilter");
+}
+function syncLegalFilterInputs(){
+  [["lg-q","q"],["lg-f-state","state"],["lg-f-risk","risk"],["lg-f-status","status"],["lg-f-type","type"]].forEach(([id,key])=>{ if ($(id)) $(id).value=lgFilters[key]; });
+}
+function updateLegalResults(){
+  const model = legalModel();
+  if ($("legal-table-body")) $("legal-table-body").innerHTML = legalRowsHtml(model);
+  if ($("legal-result-count")) $("legal-result-count").textContent = `Showing ${model.shown.length} of ${model.rows.length} legal cases`;
+  if ($("legal-active-filters")) $("legal-active-filters").innerHTML = legalFilterChipsHtml();
+  document.querySelectorAll("[data-legal-quick-filter]").forEach(tile=>{
+    const active = lgFilters.quick === tile.dataset.legalQuickFilter;
+    tile.classList.toggle("active",active); tile.setAttribute("aria-pressed",String(active));
+  });
+}
+// Like the primary dashboard, these filters repaint cached rows without
+// re-querying Supabase or disturbing an open editor.
 function lgApplyFilters(){
   lgFilters.q      = $("lg-q")?.value        ?? lgFilters.q;
   lgFilters.state  = $("lg-f-state")?.value  ?? lgFilters.state;
   lgFilters.risk   = $("lg-f-risk")?.value   ?? lgFilters.risk;
   lgFilters.status = $("lg-f-status")?.value ?? lgFilters.status;
   lgFilters.type   = $("lg-f-type")?.value   ?? lgFilters.type;
-  render();
+  updateLegalResults();
 }
+function setLegalQuickFilter(kind){ lgFilters.quick = lgFilters.quick === kind ? "" : kind; updateLegalResults(); }
+function clearLegalFilter(key){ if (!(key in lgFilters)) return; lgFilters[key]=""; syncLegalFilterInputs(); updateLegalResults(); }
+function clearLegalFilters(){ lgFilters={q:"",state:"",risk:"",status:"",type:"",quick:""}; syncLegalFilterInputs(); updateLegalResults(); }
 async function renderLegalInto(el){
   const epoch = sessionEpoch;
   const dv = dashView;                       // stale-paint guard (QC 8/31)
@@ -1372,7 +1479,8 @@ async function renderLegalInto(el){
       ? "The Legal & Claims backend (migration 018) isn't deployed yet." : error.message;
     el.innerHTML = `<div class="card"><div class="banner err">${esc(msg)}</div></div>`; return;
   }
-  const rows = list || [];
+  legalData = list || [];
+  const rows = legalData;
   // Stat tiles are scoped to ACTIVE cases — a completed matter's risk or old
   // "Litigation" status shouldn't inflate the live picture.
   const act = rows.filter(r => r.case_state === "Active");
@@ -1380,15 +1488,7 @@ async function renderLegalInto(el){
   const hiN = act.filter(r => r.risk_level === "High").length;
   const litN = act.filter(r => r.status === "Litigation").length;
   const dueN = rows.filter(lgDue).length;
-  const q = lgFilters.q.toLowerCase();
-  const shown = rows.filter(r =>
-    (!lgFilters.state  || r.case_state === lgFilters.state) &&
-    (!lgFilters.risk   || r.risk_level === lgFilters.risk) &&
-    (!lgFilters.status || r.status === lgFilters.status) &&
-    (!lgFilters.type   || r.claim_type === lgFilters.type) &&
-    (!q || [r.ref, r.complainant, r.opposing_counsel, r.company_counsel, r.eb_point,
-            r.synopsis, r.pending_action, r.epli_notes, r.notes]
-        .some(v => (v||"").toLowerCase().includes(q))));
+  const model = legalModel();
   // Off-list stored values (free-ish columns) must still be offered as filter options.
   const statusOpts = [...new Set([...LEGAL_STATUSES, ...rows.map(r=>r.status)])].filter(Boolean);
   const typeOpts   = [...new Set([...LEGAL_TYPES,    ...rows.map(r=>r.claim_type)])].filter(Boolean);
@@ -1406,37 +1506,27 @@ async function renderLegalInto(el){
           <button class="on" onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
-      <div class="row" style="margin:18px 0 4px">
-        <div class="stat"><div class="n">${activeN}</div><div class="l">Active cases</div></div>
-        <div class="stat"><div class="n" style="color:${hiN?'var(--danger)':'var(--ok)'}">${hiN}</div><div class="l">High risk</div></div>
-        <div class="stat"><div class="n" style="color:${litN?'var(--danger)':'var(--ok)'}">${litN}</div><div class="l">In litigation</div></div>
-        <div class="stat"><div class="n" style="color:${dueN?'var(--warn)':'var(--ok)'}">${dueN}</div><div class="l">Due follow-ups</div></div>
+      <div class="row dashboard-stats" style="margin:18px 0 4px">
+        <button type="button" class="stat stat-button ${lgFilters.quick==='active'?'active':''}" data-legal-quick-filter="active" aria-pressed="${lgFilters.quick==='active'}" onclick="setLegalQuickFilter('active')"><div class="n">${activeN}</div><div class="l">Active cases</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${lgFilters.quick==='high'?'active':''}" data-legal-quick-filter="high" aria-pressed="${lgFilters.quick==='high'}" onclick="setLegalQuickFilter('high')"><div class="n" style="color:${hiN?'var(--danger)':'var(--ok)'}">${hiN}</div><div class="l">High risk</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${lgFilters.quick==='litigation'?'active':''}" data-legal-quick-filter="litigation" aria-pressed="${lgFilters.quick==='litigation'}" onclick="setLegalQuickFilter('litigation')"><div class="n" style="color:${litN?'var(--danger)':'var(--ok)'}">${litN}</div><div class="l">In litigation</div><div class="stat-hint">Filter table</div></button>
+        <button type="button" class="stat stat-button ${lgFilters.quick==='due'?'active':''}" data-legal-quick-filter="due" aria-pressed="${lgFilters.quick==='due'}" onclick="setLegalQuickFilter('due')"><div class="n" style="color:${dueN?'var(--warn)':'var(--ok)'}">${dueN}</div><div class="l">Due follow-ups</div><div class="stat-hint">Filter table</div></button>
       </div>
       <div class="rule"></div>
-      <div class="dash-actions" style="gap:8px;flex-wrap:wrap">
-        <input id="lg-q" type="text" placeholder="Search ref, complainant, counsel, synopsis…" value="${esc(lgFilters.q)}" onkeydown="if(event.key==='Enter')lgApplyFilters()" style="flex:1 1 220px">
-        <select id="lg-f-state" onchange="lgApplyFilters()"><option value="">State: all</option>${LEGAL_STATES.map(s=>`<option ${lgFilters.state===s?'selected':''}>${s}</option>`).join("")}</select>
-        <select id="lg-f-risk" onchange="lgApplyFilters()"><option value="">Risk: all</option>${RISKS.map(r=>`<option ${lgFilters.risk===r?'selected':''}>${r}</option>`).join("")}</select>
-        <select id="lg-f-status" onchange="lgApplyFilters()"><option value="">Status: all</option>${statusOpts.map(s=>`<option ${lgFilters.status===s?'selected':''}>${esc(s)}</option>`).join("")}</select>
-        <select id="lg-f-type" onchange="lgApplyFilters()"><option value="">Type: all</option>${typeOpts.map(t=>`<option ${lgFilters.type===t?'selected':''}>${esc(t)}</option>`).join("")}</select>
-        <button class="btn sm sec" style="margin-left:auto" onclick="lgOpen('new')">+ New case</button>
+      <div class="filter-panel-head tracker-filter-head"><div><b>Filter legal cases</b><div id="legal-result-count" class="note-sm">Showing ${model.shown.length} of ${model.rows.length} legal cases</div></div><button class="btn sm sec" onclick="lgOpen('new')">+ New case</button></div>
+      <div class="filter-grid tracker-filter-grid">
+        <label class="filter-field filter-search"><span>Search</span><input id="lg-q" type="text" placeholder="Ref, complainant, counsel, synopsis…" value="${esc(lgFilters.q)}" oninput="lgApplyFilters()"></label>
+        <label class="filter-field"><span>Case state</span><select id="lg-f-state" onchange="lgApplyFilters()"><option value="">All states</option>${LEGAL_STATES.map(s=>`<option ${lgFilters.state===s?'selected':''}>${s}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>Risk</span><select id="lg-f-risk" onchange="lgApplyFilters()"><option value="">All risks</option>${RISKS.map(r=>`<option ${lgFilters.risk===r?'selected':''}>${r}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>Status</span><select id="lg-f-status" onchange="lgApplyFilters()"><option value="">All statuses</option>${statusOpts.map(s=>`<option ${lgFilters.status===s?'selected':''}>${esc(s)}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>Type</span><select id="lg-f-type" onchange="lgApplyFilters()"><option value="">All types</option>${typeOpts.map(t=>`<option ${lgFilters.type===t?'selected':''}>${esc(t)}</option>`).join("")}</select></label>
       </div>
+      <div id="legal-active-filters" class="active-filter-list" aria-live="polite">${legalFilterChipsHtml()}</div>
     </div>
     ${lgSelected ? lgEditor(sel) : ""}
     <div class="card" style="padding:8px 0;overflow-x:auto"><table>
       <thead><tr><th style="padding-left:20px">Case ID</th><th>Risk</th><th>Status</th><th>Complainant</th><th>Type</th><th>Opposing counsel / agency</th><th>Company counsel</th><th>EB point</th><th>Due date</th><th>Docs</th></tr></thead>
-      <tbody>${shown.length ? shown.map(r=>`<tr class="clk ${lgDue(r)?'overdue':''}" onclick="lgOpen('${esc(r.id)}')">
-        <td style="padding-left:20px"><span class="ref">${esc(r.ref)}</span>${r.case_state==='Completed'?' <span class="chip">Completed</span>':''}</td>
-        <td>${riskPill(r.risk_level)}</td>
-        <td>${lgStatusPill(r.status)}</td>
-        <td>${esc(r.complainant||'—')}</td>
-        <td>${esc(r.claim_type||'—')}</td>
-        <td>${esc(r.opposing_counsel||'—')}</td>
-        <td>${esc(r.company_counsel||'—')}</td>
-        <td>${esc(r.eb_point||'—')}</td>
-        <td>${r.due_date ? (lgDue(r)?`<span class="pill due-over">${fmtDateOnly(r.due_date)}</span>`:fmtDateOnly(r.due_date)) : (r.due_date_note?`<span class="muted">${esc(r.due_date_note)}</span>`:'—')}</td>
-        <td onclick="event.stopPropagation()">${lgDocsCell(r.docs_link)}</td>
-      </tr>`).join("") : `<tr><td colspan="10" style="padding:20px;text-align:center;color:var(--grey)">No legal cases match.</td></tr>`}</tbody>
+      <tbody id="legal-table-body">${legalRowsHtml(model)}</tbody>
     </table></div>`;
 }
 function lgEditor(r){
@@ -1486,6 +1576,7 @@ function lgEditor(r){
     <div><label>Related documents folder link</label><input id="lg-docs_link" type="text" value="${v('docs_link')}" placeholder="https://…"></div>
     <div><label>Notes on structure</label><textarea id="lg-notes" rows="2">${v('notes')}</textarea></div>
     <div id="lg-err"></div>
+    <div class="mobile-form-actions"><button class="btn ghost" onclick="lgClose()">Cancel</button><button class="btn" onclick="lgSave()">${r?"Save changes":"Create case"}</button></div>
   </div>`;
 }
 function lgOpen(id){ lgSelected = id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
@@ -1627,9 +1718,10 @@ function discardManualDraft(){ clearManualDraft(); manual = blankIncident(true);
 // Pull DOM-only values into state before any repaint (belt & braces — both
 // fields are also bound via oninput below).
 function syncManualFields(){
-  const d = $("m-desc"), e = $("m-email");
+  const d = $("m-desc"), e = $("m-email"), l = $("m-location");
   if (d) manual.description = d.value;
   if (e) manual.email = e.value;
+  if (l) manual.location = l.value;
 }
 function renderManualBox(){
   const el = $("manualbox");
@@ -1671,8 +1763,8 @@ function renderManual(){
     <h2 class="section" style="font-size:16px">Add a case manually <span class="chip">received outside the portal</span></h2>
     ${manualDraftAt?`<div class="banner ok" style="margin:6px 0 10px">Restored your unsaved draft (from ${esc(new Date(manualDraftAt).toLocaleString())}). <a onclick="discardManualDraft()" style="cursor:pointer;font-weight:700;text-decoration:underline">Start fresh instead</a></div>`:""}
     <label>Reporter's email (if known)</label><input id="m-email" type="text" value="${esc(manual.email)}" oninput="setM('email',this.value,true)">
-    <label>Location</label>
-    <select onchange="setM('location',this.value)">${locationOptions(manual.location, "")}</select>
+    <label for="m-location">Location</label>
+    ${locationPicker("m-location", manual.location, "setManualLocation", true)}
     <label>Category</label>
     <select onchange="setM('category',this.value)">${CATEGORIES.map(c=>`<option ${manual.category===c?'selected':''}>${c}</option>`).join("")}</select>
     <label>When did it happen? (if known)</label>
@@ -1688,6 +1780,7 @@ function renderManual(){
   </div>`;
 }
 function setM(k,v,silent){ manual[k]=v; saveManualDraft(); if(!silent) renderManualBox(); }
+function setManualLocation(value){ setM("location", value, true); }
 function mOnPartyInput(v){ manual.pQuery=v; renderManualBox(); const el=$("mpsearch"); if(el){el.focus();el.setSelectionRange(v.length,v.length);} }
 function mToggleRole(r,on){ const s=new Set(manual.pRoles); if(on)s.add(r);else s.delete(r); manual.pRoles=[...s]; saveManualDraft(); renderManualBox(); }
 function mPickPartyEmp(id){
@@ -1706,7 +1799,11 @@ async function submitManual(){
   const epoch = sessionEpoch;
   manual.description = $("m-desc")?.value ?? manual.description;
   manual.email = (($("m-email")?.value ?? manual.email)||"").trim();
+  manual.location = $("m-location")?.value ?? manual.location;
   errorMsg="";
+  const chosenLocation = canonicalLocation(manual.location);
+  if(chosenLocation === null){ errorMsg=locationError(false); renderManualBox(); return; }
+  manual.location = chosenLocation; manual.usState = stateMap[chosenLocation] || "";
   if(!manual.description.trim()){ errorMsg="Please paste or describe the report."; renderManualBox(); return; }
   // submit_case_v2 silently SKIPS employee parties no longer in the directory
   // (no error, case still created without them) — catch that here, e.g. a
@@ -1723,7 +1820,8 @@ async function submitManual(){
     ({ data, error } = await sb.rpc("submit_case_v2", {
       p_intake_type:"incident", p_category:manual.category, p_description:manual.description,
       p_anonymous:false, p_location:manual.location||null, p_relationship:null, p_role:null,
-      p_contact_email:manual.email||null, p_contact_phone:null, p_parties:manual.parties, p_manual:true, p_incident_date:manual.incidentDate||null }));
+      p_contact_email:manual.email||null, p_contact_phone:null, p_parties:manual.parties, p_manual:true, p_incident_date:manual.incidentDate||null,
+      p_us_state:manual.usState||null }));
   } catch(e) { error = e; }
   if(epoch !== sessionEpoch) return;
   busy=false;
