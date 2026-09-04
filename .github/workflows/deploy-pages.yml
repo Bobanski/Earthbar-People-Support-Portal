@@ -21,7 +21,7 @@ jobs:
       - name: Validate deployment boundary
         shell: bash
         run: |
-          test "$(find site -maxdepth 1 -type f | wc -l)" -eq 5
+          test "$(find site -maxdepth 1 -type f | wc -l)" -eq 6
           test "$(find site -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0
           ! grep -R -E -i 'SUPABASE_SERVICE_ROLE|SERVICE_ROLE_KEY|BEGIN (RSA |EC )?PRIVATE KEY|\.sharepoint\.com/' site
       - name: JavaScript syntax
@@ -30,6 +30,7 @@ jobs:
           node --check site/config.js
           node --check site/minizip.js
           node --check site/store_org.js
+          node --check site/store_locations.js
 
   deploy:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
