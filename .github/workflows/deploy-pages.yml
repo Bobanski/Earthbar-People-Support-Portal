@@ -18,12 +18,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - name: Validate deployment boundary
         shell: bash
         run: |
-          test "$(find site -maxdepth 1 -type f | wc -l)" -eq 6
-          test "$(find site -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 0
-          ! grep -R -E -i 'SUPABASE_SERVICE_ROLE|SERVICE_ROLE_KEY|BEGIN (RSA |EC )?PRIVATE KEY|\.sharepoint\.com/' site
+          set -euo pipefail
+          expected_paths="$(printf '%s\n' \
+            .github/workflows/deploy-pages.yml \
+            README.md \
+            SOURCE_RELEASE.md \
+            site/app.js \
+            site/config.js \
+            site/index.html \
+            site/minizip.js \
+            site/store_locations.js \
+            site/store_org.js)"
+          actual_paths="$(find . -path './.git' -prune -o -type f -printf '%P\n' | LC_ALL=C sort)"
+          history_paths="$(git log --all --pretty=format: --name-only | sed '/^$/d' | LC_ALL=C sort -u)"
+          test "$actual_paths" = "$expected_paths"
+          test "$history_paths" = "$expected_paths"
+          test -z "$(find . -path './.git' -prune -o -type l -print -quit)"
+
+          grep -Eq '^- Private source commit: `[0-9a-f]{40}` \(PR #[1-9][0-9]*\)$' SOURCE_RELEASE.md
+          test "$(grep -Ec '^\| `site/[^`]+` \| `[0-9a-f]{64}` \|$' SOURCE_RELEASE.md)" -eq 6
+          for file in app.js config.js index.html minizip.js store_locations.js store_org.js; do
+            expected="$(awk -F'`' -v path="site/$file" '$2 == path { print $4 }' SOURCE_RELEASE.md)"
+            actual="$(sha256sum "site/$file" | cut -d' ' -f1)"
+            test "${#expected}" -eq 64
+            test "$actual" = "$expected"
+          done
+
+          sensitive='SUPABASE[_]SERVICE[_]ROLE|SERVICE[_]ROLE[_]KEY|BEGIN (RSA |EC )?PRIVATE KEY|[.]sharepoint[.]com/'
+          ! grep -R -E -i "$sensitive" . --exclude-dir=.git
+          history_baseline='79d909cacc373cf8d04e6d84b3a51b8adc4a8ede'
+          git merge-base --is-ancestor "$history_baseline" HEAD
+          while read -r object path; do
+            test -n "${path:-}" || continue
+            if test "$(git cat-file -t "$object")" = blob && git cat-file blob "$object" | grep -Eiq "$sensitive"; then
+              echo "Sensitive value found in public history path: $path" >&2
+              exit 1
+            fi
+          done < <(git rev-list --objects --all --not "$history_baseline")
       - name: JavaScript syntax
         run: |
           node --check site/app.js

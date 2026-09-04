@@ -274,12 +274,13 @@ async function forceSignOut(reason){
   finally { clearAllAuthStorage(); }
 }
 
-// NOTE (meeting 2026-07-13): harassment/discrimination is deliberately NOT an
-// option — HR classifies internally after review. FINAL LIST STILL OPEN — placeholder:
-const CATEGORIES = ["Manager conduct","Coworker conduct","Workplace safety","Pay / hours dispute","Policy violation","Customer incident","Other"];
+// HR review 2026-09-04 superseded the 7/13 intake decision: these three concerns
+// must be available directly to reporters rather than only classified by HR later.
+const CATEGORIES = ["Manager conduct","Coworker conduct","Harassment","Discrimination","Retaliation","Workplace safety","Pay / hours dispute","Policy violation","Customer incident","Other"];
 const RELATIONSHIPS = ["Employee","Former employee","Customer","Vendor / partner","Other"];
 const REQUEST_TYPES = ["Accommodation — Religious","Accommodation — Medical","Accommodation — Other","Other request"];
 const RISKS = ["Low","Medium","High"];
+const CASE_DETAIL_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
 // 8/18 sync call: "Subject" is displayed as "Implicated Person"; Witness is
 // split into firsthand / secondhand; "Reporter" added (someone reporting on
 // behalf of others). Stored values are kept stable for data continuity —
@@ -384,12 +385,14 @@ let legalData = [];
 let closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
 let lastShown = [];        // rows currently visible on the cases/requests dashboard (feeds Export CSV)
 let caseExport = null;     // everything fetched for the open case detail (feeds Export case .zip)
+let caseExportInProgress = false, caseExportGeneration = 0;
 let lookup = { query:"", picked:null, result:null, err:"" };
 let evidence = { list:[], err:"" };
 let partySearchResults = [], partySearchSeq = 0, partySearchTimer = null, partySearchError = "";
 let partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
 let evidenceRetry = { caseId:null, files:[] };
 let activeUserId = null, sessionEpoch = 0;
+let interviewSavePromises = new Map();
 
 function verifiedEmail(){ return (session?.user?.email || "").trim().toLowerCase(); }
 function canUseDirectorySearch(){ return !!session; }
@@ -416,10 +419,12 @@ function resetSessionState(){
   lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = [];
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
+  caseExportInProgress = false; caseExportGeneration += 1;
   lookup = { query:"", picked:null, result:null, err:"" };
   evidence = { list:[], err:"" }; evidenceRetry = { caseId:null, files:[] };
   partySearchResults = []; partySearchError = "";
   partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
+  interviewSavePromises.clear();
 }
 
 function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
@@ -498,7 +503,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
-  exportCasesCsv, exportCaseZip,
+  exportCasesCsv, exportCaseZip, assertCaseZipBudget,
   saveRisk, savePolicies, uploadCaseEvidence,
   togglePartyEditor, setPartyEditRole, onPartyEditInput, pickPartyEditEmployee, removePartyEdit, savePartyEdit,
   onLookupInput, pickLookup, backToLookup, retryMyReports, retryEvidenceUploads });
@@ -809,8 +814,8 @@ function renderIncident(){
       <label>Your current role at Earthbar</label>
       <input id="f-role" type="text" placeholder="e.g. Shift lead, EB Brentwood" value="${esc(form.role)}" oninput="setF('role',this.value,true)">`:""}
 
-    <label>Category</label>
-    <select onchange="setF('category',this.value)">${CATEGORIES.map(c=>`<option ${form.category===c?'selected':''}>${c}</option>`).join("")}</select>
+    <label for="f-category">Category</label>
+    <select id="f-category" onchange="setF('category',this.value)">${CATEGORIES.map(c=>`<option ${form.category===c?'selected':''}>${c}</option>`).join("")}</select>
     <p class="note-sm">Pick the closest fit — HR reviews and classifies every report after it's submitted.</p>
 
     ${partyBuilder(form,"")}
@@ -1765,8 +1770,8 @@ function renderManual(){
     <label>Reporter's email (if known)</label><input id="m-email" type="text" value="${esc(manual.email)}" oninput="setM('email',this.value,true)">
     <label for="m-location">Location</label>
     ${locationPicker("m-location", manual.location, "setManualLocation", true)}
-    <label>Category</label>
-    <select onchange="setM('category',this.value)">${CATEGORIES.map(c=>`<option ${manual.category===c?'selected':''}>${c}</option>`).join("")}</select>
+    <label for="m-category">Category</label>
+    <select id="m-category" onchange="setM('category',this.value)">${CATEGORIES.map(c=>`<option ${manual.category===c?'selected':''}>${c}</option>`).join("")}</select>
     <label>When did it happen? (if known)</label>
     <input type="date" max="${todayStr()}" value="${esc(manual.incidentDate)}" onchange="setM('incidentDate',this.value,true)">
     ${partyBuilder(manual,"m")}
@@ -1959,10 +1964,8 @@ async function savePartyEdit(){
 
 async function renderCaseDetailInto(el, id){
   const epoch = sessionEpoch;
-  const CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
-  const [{data:c}, {data:parties}, {data:events}, {data:tasks}, {data:messages}, {data:notes},
-         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}] = await Promise.all([
-    sb.from("cases").select(CASE_COLS).eq("id",id).maybeSingle(),
+  const detailResults = await Promise.all([
+    sb.from("cases").select(CASE_DETAIL_COLS).eq("id",id).maybeSingle(),
     sb.from("case_parties").select("*").eq("case_id",id),
     sb.from("case_events").select("*").eq("case_id",id).order("at",{ascending:true}),
     sb.from("tasks").select("*").eq("case_id",id).order("created_at",{ascending:true}),
@@ -1974,6 +1977,11 @@ async function renderCaseDetailInto(el, id){
     // email-intake attachment metadata (migration 019) — degrades to empty pre-019
     sb.from("case_files").select("*").eq("case_id",id).order("created_at",{ascending:true}),
   ]);
+  const [{data:c}, {data:parties}, {data:events}, {data:tasks}, {data:messages}, {data:notes},
+         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}] = detailResults;
+  const detailLabels = ["case", "team members", "timeline", "tasks", "messages", "HR notes",
+    "allegations", "interviews", "corrective actions", "email attachments"];
+  const exportLoadErrors = detailResults.flatMap((result, index)=>result.error ? [detailLabels[index]] : []);
   if (epoch !== sessionEpoch || selected !== id || !el.isConnected) return;  // stale-paint/session guard
   caseAllegs = allegs || [];   // used by the close modal gate
   if(!c){ el.innerHTML=`<button class="back" onclick="closeCase()">← Back</button><div class="card"><div class="banner warn">This case isn't available to you.</div></div>`; return; }
@@ -1988,7 +1996,7 @@ async function renderCaseDetailInto(el, id){
   // everything the .zip export needs — snapshot of what this view fetched
   caseExport = { c, parties: parties||[], events: events||[], tasks: tasks||[], messages: messages||[],
                  notes: notes||[], allegations: allegs||[], interviews: ivs||[], actions: actions||[],
-                 files: cfiles||[], handlerName };
+                 files: cfiles||[], exportLoadErrors, handlerName };
   // Loose transitions for both lifecycles; Reopened only offered from Closed.
   const nexts = isReq
     ? (c.state==="Closed" ? ["Assigned"] : REQ_STATES.filter(s=>s!==c.state))
@@ -1998,7 +2006,8 @@ async function renderCaseDetailInto(el, id){
   el.innerHTML = `<button class="back" onclick="closeCase()">← Back to dashboard</button>
   <div class="card">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="ref" style="font-size:16px">${esc(c.ref)}</span>${pill(c.state)}${riskPill(caseRisk(c))}${isReq&&c.accommodation_status?accPill(c.accommodation_status):''}${!isReq&&c.substantiated===true?'<span class="chip">Substantiated</span>':!isReq&&c.substantiated===false?'<span class="chip soft">Unsubstantiated</span>':''}${c.closure_category?`<span class="chip">Closure: ${esc(c.closure_category)}${c.closure_ref?' → '+esc(c.closure_ref):''}</span>`:''}
-      <button class="btn sm ghost" style="margin-left:auto" onclick="exportCaseZip()">Export case (.zip)</button></div>
+      <span id="case-export-status" class="note-sm" style="margin-left:auto" role="status" aria-live="polite" aria-atomic="true"></span>
+      <button id="case-export-btn" class="btn sm ghost" aria-busy="false" aria-describedby="case-export-status" onclick="exportCaseZip()">Export case (.zip)</button></div>
     <h2 class="section" style="margin-top:6px">${esc(c.category)}</h2>
     <div class="row">
       <div class="col">
@@ -2255,16 +2264,30 @@ async function removePolicyChip(caseId, p){
 }
 // Interviews: explicit Save and notes-blur autosave both write straight to the DB.
 // Neither triggers a re-render, so typing/scroll position is never lost mid-interview.
-async function saveInterviewUI(caseId, id, silent){
+function saveInterviewUI(caseId, id, silent){
   const g = k => $(`iv-${k}-${id}`)?.value ?? null;
-  const { error } = await sb.rpc("save_interview", {
-    p_id: id, p_case_id: caseId,
-    p_interviewee: g("name"), p_role: g("role"), p_date: g("date") || null,
-    p_interviewer: g("by"), p_status: g("status"),
-    p_notes: $(`iv-notes-${id}`)?.value ?? null, p_follow_up: g("fu") });
-  const s = $(`iv-saved-${id}`);
-  if(error){ if(s) s.textContent = "Save failed"; if(!silent) alert(errText(error)); return; }
-  if(s) s.textContent = "Saved " + new Date().toLocaleTimeString();
+  const payload = {
+    p_id:id, p_case_id:caseId,
+    p_interviewee:g("name"), p_role:g("role"), p_date:g("date") || null,
+    p_interviewer:g("by"), p_status:g("status"),
+    p_notes:$(`iv-notes-${id}`)?.value ?? null, p_follow_up:g("fu"),
+  };
+  const key = `${caseId}:${id}`;
+  const previous = interviewSavePromises.get(key);
+  const run = (async()=>{
+    if(previous) await previous;
+    let error;
+    try { ({error} = await sb.rpc("save_interview", payload)); }
+    catch(caught) { error = caught; }
+    const s = $(`iv-saved-${id}`);
+    if(error){ if(s) s.textContent = "Save failed"; if(!silent) alert(errText(error)); return false; }
+    if(s) s.textContent = "Saved " + new Date().toLocaleTimeString();
+    return true;
+  })();
+  let tracked;
+  tracked = run.finally(()=>{ if(interviewSavePromises.get(key) === tracked) interviewSavePromises.delete(key); });
+  interviewSavePromises.set(key,tracked);
+  return tracked;
 }
 async function addInterviewUI(caseId){
   const name = ($("ni-name")?.value || "").trim();
@@ -2608,8 +2631,8 @@ function exportCasesCsv(){
   downloadBlob(new Blob([csv], {type:"text/csv;charset=utf-8"}), `hr-cases-${todayStr()}.csv`);
 }
 // ---- case .zip export: printable summary + message thread + raw JSON --------
-function caseMessagesTxt(){
-  const { c, messages, handlerName } = caseExport;
+function caseMessagesTxt(snapshot=caseExport){
+  const { c, messages, handlerName } = snapshot;
   const who = m => m.sender_type === "handler" ? `HR (${handlerName})`
     : m.sender_type === "email" ? `Email (${m.sender_email || "external"})`
     : (c.anonymous ? "Anonymous reporter" : (c.reporter_display || "Reporter"))
@@ -2624,8 +2647,8 @@ function caseMessagesTxt(){
   }
   return lines.join("\r\n");
 }
-function caseSummaryHtml(){
-  const { c, parties, events, tasks, messages, notes, allegations, interviews, actions, files, handlerName } = caseExport;
+function caseSummaryHtml(snapshot=caseExport){
+  const { c, parties, events, tasks, messages, notes, allegations, interviews, actions, attachments=[], handlerName } = snapshot;
   const isReq = c.intake_type === "request";
   const dash = v => (v==null || v==="") ? "—" : esc(v);
   const kv = (k, v) => `<tr><th>${esc(k)}</th><td>${(v==null||v==="")?"—":v}</td></tr>`;
@@ -2693,23 +2716,246 @@ ${sec("Follow-up tasks", tasks.length
 ${sec("HR notes", notes.length
   ? notes.map(n=>`<div class="box" style="margin-bottom:10px"><div class="muted" style="font-size:11px">${esc(n.author_email||"")} · ${esc(fmt(n.created_at))}</div>${esc(n.body)}</div>`).join("")
   : `<p class="muted">No notes.</p>`)}
-${(files||[]).length?sec("Files (received by email)", `<table class="grid"><tr><th>File</th><th>Size</th><th>Source</th></tr>${(files||[]).map(f=>`<tr><td>${esc(f.file_name)}</td><td>${esc(fmtBytes(f.size_bytes))}</td><td>${dash(f.source)}${f.storage_path?"":" — original in the peoplesupport@ mailbox"}</td></tr>`).join("")}</table>`):""}
+${sec("Attachments included in this export", attachments.length
+  ? `<table class="grid"><tr><th>File</th><th>Size</th><th>Source</th></tr>${attachments.map(f=>`<tr><td>${esc(f.file_name)}</td><td>${esc(fmtBytes(f.size_bytes))}</td><td>${esc(f.source)}</td></tr>`).join("")}</table>`
+  : `<p class="muted">No attachments.</p>`)}
 ${sec("Timeline (audit log)", events.length
   ? `<table class="grid"><tr><th>When</th><th>Type</th><th>Note</th></tr>${events.map(e=>`<tr><td style="white-space:nowrap">${esc(fmt(e.at))}</td><td>${dash(e.type)}</td><td>${dash(e.note)}</td></tr>`).join("")}</table>`
   : `<p class="muted">No events.</p>`)}
 ${sec("Messages", `<p class="muted">${messages.length} message(s) — full thread in <b>messages.txt</b> in this export.</p>`)}
 </body></html>`;
 }
-function exportCaseZip(){
+const MAX_CASE_EXPORT_BYTES = 100 * 1024 * 1024;
+const MAX_CASE_EXPORT_ATTACHMENTS = 5000;
+const CASE_EXPORT_PAGE_SIZE = 100;
+const portalEvidenceDisplayName = name => String(name || "attachment")
+  .replace(/^(?:\d{10,}|[0-9a-f]{8}-[0-9a-f-]{27})_/i, "");
+function safeZipFileName(value){
+  let leaf = String(value || "attachment").split(/[\\/]/).pop()
+    .replace(/[<>:"|?*\x00-\x1f\x7f\u0085\u200b-\u200f\u2028-\u202e\u2066-\u2069]/g, "_").trim().replace(/[. ]+$/g, "");
+  if(!leaf || /^\.+$/.test(leaf)) return "attachment";
+  if(leaf.length > 180){
+    const dot = leaf.lastIndexOf(".");
+    const extension = dot > 0 && leaf.length - dot <= 16 ? leaf.slice(dot) : "";
+    const stem = extension ? leaf.slice(0,dot) : leaf;
+    leaf = stem.slice(0,180-extension.length).replace(/[. ]+$/g, "") + extension;
+  }
+  leaf = leaf.replace(/[. ]+$/g, "");
+  if(!leaf || /^\.+$/.test(leaf)) return "attachment";
+  if(/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(leaf)) leaf = `_${leaf}`;
+  return leaf;
+}
+function uniqueZipPath(folder, fileName, used){
+  const safe = safeZipFileName(fileName);
+  const dot = safe.lastIndexOf(".");
+  const stem = dot > 0 ? safe.slice(0, dot) : safe;
+  const ext = dot > 0 ? safe.slice(dot) : "";
+  let candidate = `${folder}/${safe}`, suffix = 2;
+  while(used.has(candidate.toLowerCase())) candidate = `${folder}/${stem} (${suffix++})${ext}`;
+  used.add(candidate.toLowerCase());
+  return candidate;
+}
+async function listAllCaseEvidence(caseId){
+  const files = [];
+  for(let offset=0;;offset+=100){
+    const { data, error } = await sb.storage.from("evidence").list(caseId, {
+      limit:100, offset, sortBy:{column:"name",order:"asc"},
+    });
+    if(error) throw new Error("The portal evidence list could not be loaded.");
+    const batch = data || [];
+    files.push(...batch.filter(item=>item && item.id !== null));
+    if(batch.length < 100) break;
+  }
+  return files;
+}
+async function assertFreshCaseExportAccess(caseId){
+  const {data, error} = await sb.from("cases").select("id,updated_at").eq("id",caseId).maybeSingle();
+  if(error || !data) throw new Error("Case access could not be confirmed. Refresh the case and try again.");
+  return data;
+}
+async function fetchAllCaseExportRows(table, caseId, orderColumn){
+  const rows = [];
+  for(let from=0;;from+=CASE_EXPORT_PAGE_SIZE){
+    let query = sb.from(table).select("*").eq("case_id",caseId).order(orderColumn,{ascending:true});
+    if(orderColumn !== "id") query = query.order("id",{ascending:true});
+    const {data, error} = await query.range(from, from + CASE_EXPORT_PAGE_SIZE - 1);
+    if(error) throw new Error(`A complete export cannot be created because ${table.replaceAll("_"," ")} did not load. Refresh the case and try again.`);
+    const batch = data || [];
+    rows.push(...batch);
+    if(batch.length < CASE_EXPORT_PAGE_SIZE) break;
+  }
+  return rows;
+}
+async function loadFreshCaseExportSnapshot(source, caseId){
+  const {data:c, error} = await sb.from("cases").select(CASE_DETAIL_COLS).eq("id",caseId).maybeSingle();
+  if(error || !c) throw new Error("Case access could not be confirmed. Refresh the case and try again.");
+  const specs = [
+    ["parties", "case_parties", "id"], ["events", "case_events", "at"],
+    ["tasks", "tasks", "created_at"], ["messages", "messages", "created_at"],
+    ["notes", "case_notes", "created_at"], ["allegations", "case_allegations", "created_at"],
+    ["interviews", "case_interviews", "created_at"], ["actions", "corrective_actions", "created_at"],
+    ["files", "case_files", "created_at"],
+  ];
+  const results = await Promise.all(specs.map(([,table,order])=>fetchAllCaseExportRows(table,caseId,order)));
+  const snapshot = {...source, c:{...c}, exportLoadErrors:[], handlerName:c.external?"External advisor":nameOf(c.handler_id)};
+  specs.forEach(([key], index)=>{ snapshot[key] = results[index]; });
+  return snapshot;
+}
+function caseFilePathAllowed(file, caseId){
+  const parts = String(file.storage_path||"").split("/");
+  if(parts.length < 2 || parts.some(part=>!part || part === "." || part === "..")) return false;
+  if(file.source === "email") return parts[0] === `case_${caseId}`;
+  return parts[0] === `case_${caseId}` || parts[0] === caseId;
+}
+const portalInventorySignature = files => files.map(file=>[
+  file.id||"", file.name||"", Number(file.metadata?.size)||0,
+].join("\u0000")).sort().join("\u0001");
+const caseFileInventorySignature = files => files.map(file=>[
+  file.id||"", file.storage_path||"", file.file_name||"", file.source||"", Number(file.size_bytes)||0,
+].join("\u0000")).sort().join("\u0001");
+async function awaitPendingInterviewSaves(caseId, button){
+  if(document.activeElement?.id?.startsWith("iv-")) document.activeElement.blur();
+  await Promise.resolve();
+  const pending = [...interviewSavePromises.entries()]
+    .filter(([key])=>key.startsWith(`${caseId}:`)).map(([,promise])=>promise);
+  if(!pending.length) return;
+  const status = $("case-export-status");
+  if(status?.isConnected) status.textContent = "Saving interview notes…";
+  const results = await Promise.all(pending);
+  if(results.some(saved=>!saved)) throw new Error("Interview notes could not be saved, so the export was stopped. Save them and retry.");
+}
+function attachmentManifest(snapshot){
+  const lines = [
+    `Attachment manifest — ${snapshot.c.ref}`,
+    `Exported ${snapshot.exported_at}`,
+    "All attachments listed below are included in this archive.",
+    "=".repeat(64), "",
+  ];
+  if(!snapshot.attachments.length) lines.push("(no attachments)");
+  snapshot.attachments.forEach((file, i)=>lines.push(
+    `${i+1}. ${file.file_name}`,
+    `   Source: ${file.source}`,
+    `   Archive path: ${file.zip_path}`,
+    `   Size: ${file.size_bytes} bytes`, "",
+  ));
+  return lines.join("\r\n");
+}
+function assertCaseZipBudget(files, maxBytes=MAX_CASE_EXPORT_BYTES){
+  const encoder = new TextEncoder();
+  const payloadBytes = files.reduce((total,file)=>total + (typeof file.data === "string"
+    ? encoder.encode(file.data).byteLength : file.data.byteLength), 0);
+  const headerBytes = 22 + files.reduce((total,file)=>total + 76 + 2*encoder.encode(file.name).byteLength, 0);
+  if(payloadBytes + headerBytes > maxBytes){
+    throw new Error("This case export is larger than 100 MB. Export attachments separately or contact support for a larger archive.");
+  }
+}
+async function exportCaseZip(){
   if(!caseExport || !selected || caseExport.c?.id !== selected){ alert("Open a case first."); return; }
-  const { c } = caseExport;
-  const zip = makeZip([
-    { name: "summary.html", data: caseSummaryHtml() },
-    { name: "messages.txt", data: caseMessagesTxt() },
-    { name: "case.json",    data: JSON.stringify(caseExport, null, 2) },
-  ]);
-  const safe = (c.ref || "case").replace(/[^\w.-]+/g, "-");
-  downloadBlob(new Blob([zip], {type:"application/zip"}), `${safe}.zip`);
+  if(caseExportInProgress) return;
+  caseExportInProgress = true;
+  const exportGeneration = ++caseExportGeneration;
+  const source = caseExport;
+  const caseId = source.c.id, epoch = sessionEpoch, userId = session?.user?.id;
+  const sourceUpdatedAt = source.c.updated_at;
+  const button = $("case-export-btn");
+  const status = $("case-export-status");
+  if(button){ button.disabled = true; button.setAttribute("aria-busy","true"); }
+  if(status) status.textContent = "Preparing export…";
+  const stillCurrent = () => epoch === sessionEpoch && session?.user?.id === userId
+    && selected === caseId && caseExport === source && source.c.updated_at === sourceUpdatedAt
+    && caseExportGeneration === exportGeneration;
+  try {
+    await awaitPendingInterviewSaves(caseId,button);
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    const fresh = await loadFreshCaseExportSnapshot(source, caseId);
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    const portalFiles = await listAllCaseEvidence(caseId);
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    const unavailable = (fresh.files||[]).filter(file=>!file.storage_path);
+    if(unavailable.length){
+      const names = unavailable.map(file=>safeZipFileName(file.file_name||"unnamed attachment")).join(", ");
+      throw new Error(`A complete export cannot be created because these email attachments are only in the People Support mailbox: ${names}. Open each file from the mailbox, then upload it under Evidence in this case and retry.`);
+    }
+    const invalidPaths = (fresh.files||[]).filter(file=>!caseFilePathAllowed(file,caseId));
+    if(invalidPaths.length) throw new Error("A complete export cannot be created because an attachment is not linked to this case. Contact support before exporting.");
+    const candidates = [
+      ...portalFiles.map(file=>({
+        source:"Portal evidence", fileName:safeZipFileName(portalEvidenceDisplayName(file.name)),
+        storagePath:`${caseId}/${file.name}`, sizeBytes:Number(file.metadata?.size)||null,
+        folder:"attachments/portal",
+      })),
+      ...(fresh.files||[]).map(file=>({
+        source:file.source === "email" ? "Email attachment" : `${safeZipFileName(file.source||"Case file")} attachment`,
+        fileName:safeZipFileName(file.file_name||file.storage_path.split("/").pop()),
+        storagePath:file.storage_path, sizeBytes:Number(file.size_bytes)||null,
+        folder:file.source === "email" ? "attachments/email" : "attachments/case-files",
+      })),
+    ];
+    const seenStoragePaths = new Set(), expected = candidates.filter(file=>{
+      if(seenStoragePaths.has(file.storagePath)) return false;
+      seenStoragePaths.add(file.storagePath); return true;
+    });
+    if(expected.length > MAX_CASE_EXPORT_ATTACHMENTS){
+      throw new Error(`This case has more than ${MAX_CASE_EXPORT_ATTACHMENTS.toLocaleString()} attachments. Contact support for an archival export.`);
+    }
+    const knownTotalBytes = expected.reduce((total, file)=>total + (file.sizeBytes || 0), 0);
+    if(knownTotalBytes > MAX_CASE_EXPORT_BYTES) throw new Error("This case has more than 100 MB of attachments. Export them separately or contact support for a larger archive.");
+    const used = new Set(["summary.html","messages.txt","case.json","attachments/manifest.txt"]);
+    const zipAttachments = [], attachmentMetadata = [];
+    let totalBytes = 0;
+    for(const [index,file] of expected.entries()){
+      if(status?.isConnected) status.textContent = `Adding attachments ${index+1}/${expected.length}…`;
+      const { data, error } = await sb.storage.from("evidence").download(file.storagePath);
+      if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+      if(error || !data) throw new Error(`A complete export cannot be created because “${file.fileName}” could not be retrieved.`);
+      const bytes = new Uint8Array(await data.arrayBuffer());
+      if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+      totalBytes += bytes.byteLength;
+      if(totalBytes > MAX_CASE_EXPORT_BYTES) throw new Error("This case has more than 100 MB of attachments. Export them separately or contact support for a larger archive.");
+      const zipPath = uniqueZipPath(file.folder, file.fileName, used);
+      zipAttachments.push({name:zipPath,data:bytes});
+      attachmentMetadata.push({
+        file_name:file.fileName, source:file.source, storage_path:file.storagePath,
+        zip_path:zipPath, size_bytes:bytes.byteLength,
+      });
+    }
+    if(status?.isConnected) status.textContent = "Verifying attachments…";
+    const [finalPortalFiles, finalCaseFiles] = await Promise.all([
+      listAllCaseEvidence(caseId), fetchAllCaseExportRows("case_files",caseId,"created_at"),
+    ]);
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    if(portalInventorySignature(finalPortalFiles) !== portalInventorySignature(portalFiles)
+      || caseFileInventorySignature(finalCaseFiles) !== caseFileInventorySignature(fresh.files||[])){
+      throw new Error("Attachments changed while the export was being prepared. Retry to capture the latest files.");
+    }
+    const finalAccess = await assertFreshCaseExportAccess(caseId);
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    if(finalAccess.updated_at !== fresh.c.updated_at) throw new Error("The case changed while the export was being prepared. Retry to capture the latest record.");
+    const snapshot = {
+      ...fresh, files:(fresh.files||[]).map(file=>({...file})),
+      attachments:attachmentMetadata, exported_at:new Date().toISOString(),
+      export_attachment_bytes:totalBytes,
+    };
+    const zipFiles = [
+      { name:"summary.html", data:caseSummaryHtml(snapshot) },
+      { name:"messages.txt", data:caseMessagesTxt(snapshot) },
+      { name:"case.json", data:JSON.stringify(snapshot, null, 2) },
+      { name:"attachments/manifest.txt", data:attachmentManifest(snapshot) },
+      ...zipAttachments,
+    ];
+    assertCaseZipBudget(zipFiles);
+    const zip = makeZip(zipFiles);
+    const safe = (fresh.c.ref || "case").replace(/[^\w.-]+/g, "-");
+    downloadBlob(new Blob([zip], {type:"application/zip"}), `${safe}.zip`);
+  } catch(error) {
+    if(stillCurrent()) alert(error?.message || "The case export could not be created. Please try again.");
+  } finally {
+    if(caseExportGeneration === exportGeneration){
+      caseExportInProgress = false;
+      if(button?.isConnected){ button.disabled = false; button.setAttribute("aria-busy","false"); }
+      if(status?.isConnected) status.textContent = "";
+    }
+  }
 }
 
 function render(){
