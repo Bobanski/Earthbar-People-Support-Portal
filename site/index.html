@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light">
 <meta name="theme-color" content="#F8F8F6">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://kocslkcomltzfzlttvhx.supabase.co wss://kocslkcomltzfzlttvhx.supabase.co; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' https://kocslkcomltzfzlttvhx.supabase.co wss://kocslkcomltzfzlttvhx.supabase.co; img-src 'self' data: https://kocslkcomltzfzlttvhx.supabase.co; frame-src https://kocslkcomltzfzlttvhx.supabase.co; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; form-action 'self'">
 <title>People Support Portal · Earthbar & Beaming</title>
 <style>
   /* =====================================================================================
@@ -309,6 +309,17 @@
   .mobile-form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
   .hrnote{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);margin-bottom:8px;font-size:14px;white-space:pre-wrap;color:var(--ink-2)}
   .hrnote .t{font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+  .legal-summary-head,.legal-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .legal-summary-notes{gap:16px;margin-top:18px}
+  .detail-copy{margin-top:6px;padding:12px 14px;min-height:48px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--ink-2);white-space:pre-wrap;font-size:14px}
+  .legal-detail-row{align-items:stretch}
+  .legal-detail-row>.card{margin-top:0}
+  .legal-note-compose,.legal-upload{display:flex;align-items:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .legal-note-compose textarea,.legal-upload input{flex:1;min-width:190px}
+  .legal-preview-modal{width:min(980px,calc(100vw - 32px));max-width:980px}
+  .legal-preview-canvas{display:grid;place-items:center;margin-top:16px;height:min(68vh,720px);overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
+  .legal-preview-canvas iframe{display:block;width:100%;height:100%;border:0}
+  .legal-preview-canvas img{display:block;max-width:100%;max-height:100%;object-fit:contain}
   #manualbox .card{box-shadow:var(--glow)}
 
   /* ---- case detail panels ---- */
@@ -368,6 +379,11 @@
     .dashboard-stats .stat{width:100%;min-width:0;padding:14px}
     .dashboard-stats>.stat:last-child:nth-child(odd){grid-column:1/-1}
     .dashboard-stats .stat .n{font-size:25px}
+    .legal-note-compose>.btn,.legal-upload>.btn{width:100%}
+    .legal-editor-head{flex-wrap:wrap}
+    .legal-editor-head>b{flex:1 0 100%;overflow-wrap:normal;word-break:normal}
+    .legal-preview-modal{padding:16px}
+    .legal-preview-canvas{height:62vh}
     .login-card{margin:8px auto;padding:24px 20px}
     .login-actions .btn{flex:1 1 145px}
     .mobile-form-actions .btn{flex:1}
@@ -388,6 +404,7 @@
     .filters.is-open{max-height:1800px}
     .filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
     .filter-search{grid-column:1/-1}
+    .filter-wide-mobile{grid-column:1/-1}
   }
   @media (max-width:420px){
     .btn{padding:10px 16px}
@@ -396,6 +413,7 @@
     .radio-card{min-width:100%}
     .filter-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 8px}
     .filter-search{grid-column:1/-1}
+    .filter-wide-mobile{grid-column:1/-1}
     .tracker-filter-head{align-items:flex-start}
     .tracker-filter-head .btn{white-space:nowrap}
   }
