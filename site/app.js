@@ -25,7 +25,7 @@
 //                      reporter_reply, app_is_admin, app_is_handler
 // ============================================================================
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.115.0/+esm";
-import { REGIONS, DISTRICTS, storeOrg } from "./store_org.js";
+import { DISTRICT_LEADERS, storeOrg } from "./store_org.js";
 import { STORE_LOCATIONS } from "./store_locations.js";
 import { makeZip } from "./minizip.js";
 
@@ -356,6 +356,11 @@ const SLABEL = { UnderReview:"Under Review", OnHold:"On Hold",
   AwaitingInformation:"Awaiting Information", InInteractiveProcess:"In Interactive Process",
   DecisionPending:"Decision Pending", ActionMonitoring:"Action / Monitoring" };
 const stlabel = s => SLABEL[s] || s;
+const FISCAL_PERIODS = {
+  P5:{ from:"2026-04-20", to:"2026-05-17", label:"P5 · Apr 20–May 17" },
+  P6:{ from:"2026-05-18", to:"2026-06-14", label:"P6 · May 18–Jun 14" },
+  P7:{ from:"2026-06-15", to:"2026-07-12", label:"P7 · Jun 15–Jul 12" },
+};
 
 // ---- state ----
 let session = null, me = null, isHandler = false, isAdmin = false, signedOutReason = "", trustedDeviceNotice = "";
@@ -367,7 +372,7 @@ let qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
 let dashView = "cases";
 let receipt = null, statusResult = null, myReports = [], myReportsError = "", myReportsLoading = true, myReportsLoaded = false;
 let myReportsPromise = null;
-const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", from:"", to:"", acc:"", dur:"", us:"", region:"", district:"", quick:"" });
+const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", period:"", acc:"", dur:"", us:"", leader:"", quick:"" });
 let filters = blankDashboardFilters();
 let dashboardData = [];
 // 8/18 call: state changes need a second "save" click before anything is
@@ -382,6 +387,13 @@ let wcData = [];
 let lgSelected = null;      // null = list; "new" = create form; else legal_cases.id
 let lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" };   // Active by default (spec)
 let legalData = [];
+let lgEditing = false;
+let legalDetail = { notes:[], files:[], errors:[] };
+let legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false };
+let legalBusy = { note:false, upload:false };
+let legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" };
+let legalPreviewGeneration = 0;
+let legalPreviewRestoreName = "";
 let closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
 let lastShown = [];        // rows currently visible on the cases/requests dashboard (feeds Export CSV)
 let caseExport = null;     // everything fetched for the open case detail (feeds Export case .zip)
@@ -397,6 +409,7 @@ let interviewSavePromises = new Map();
 function verifiedEmail(){ return (session?.user?.email || "").trim().toLowerCase(); }
 function canUseDirectorySearch(){ return !!session; }
 function resetSessionState(){
+  setLegalPreviewBackgroundInert(false);
   clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
   clearTimeout(trustedExpiryTimer); trustedExpiryTimer = null;
   trustedSessionDeadline = 0;
@@ -417,6 +430,9 @@ function resetSessionState(){
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
   wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = [];
   lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = [];
+  lgEditing = false; legalDetail = { notes:[], files:[], errors:[] };
+  legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false }; legalBusy = { note:false, upload:false };
+  legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1;
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
   caseExportInProgress = false; caseExportGeneration += 1;
@@ -469,10 +485,19 @@ const riskPill = r => r ? `<span class="pill r-${classToken(r)}">${esc(r)}</span
 const accPill = s => !s ? '<span class="muted">pending</span>'
   : `<span class="pill a-${s.split(' ')[0]}">${esc(s)}</span>`;
 const caseRisk = c => c.risk_level || (c.severity === "High" ? "High" : null);
-// Region/District come from the embedded store org map (store_org.js), matched
-// on normalized location name; stores not in the map bucket under "Other".
-const caseRegion = c => storeOrg(c.location)?.region || "Other";
-const caseDistrict = c => storeOrg(c.location)?.district || "Other";
+// District leader comes from the daily Store Directory snapshot embedded in
+// store_org.js. Unmatched or non-store locations bucket under "Other".
+const caseDistrictLeader = c => storeOrg(c.location)?.districtLeader || "Other";
+// Monique is listed under her legal name in the Store Directory. Keep the
+// source value for matching while showing the name Operations uses day to day.
+const districtLeaderLabel = value => value === "Latoya Martin" ? "Monique (Latoya Martin)" : value;
+const caseOpenedInPeriod = (c, key) => {
+  const p = FISCAL_PERIODS[key];
+  if (!p) return true;
+  const opened = new Date(c.created_at).getTime();
+  return opened >= new Date(p.from + "T00:00:00").getTime()
+    && opened <= new Date(p.to + "T23:59:59.999").getTime();
+};
 // Under the status pill: why the case closed ("Duplicate → EB-2026-0142").
 const closureLine = c => c.closure_category
   ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(c.closure_category)}${c.closure_ref?' → '+esc(c.closure_ref):''}</div>` : "";
@@ -501,7 +526,8 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
-  lgOpen, lgClose, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
+  lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
+  lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip, assertCaseZipBudget,
   saveRisk, savePolicies, uploadCaseEvidence,
@@ -513,6 +539,7 @@ async function boot(){
   for (const eventName of USER_ACTIVITY_EVENTS) {
     document.addEventListener(eventName, recordUserActivity, true);
   }
+  document.addEventListener("keydown", handleLegalPreviewKeydown, true);
   window.addEventListener("storage", event => {
     if (event.key === CROSS_TAB_SIGNOUT_KEY && event.newValue) {
       void acceptCrossTabSignOut();
@@ -648,6 +675,7 @@ function go(v){
   if ((v==="dashboard"||v==="lookup") && !isHandler) v="home";
   if (showManual){ syncManualFields(); flushManualDraft(true); }   // nav closes the form — persist the debounce tail first
   view=v; clearSelectedCaseState(); receipt=null; errorMsg=""; showManual=false;
+  if(v!=="dashboard"){ setLegalPreviewBackgroundInert(false); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; }
   if(v==="status"){ myReportsError=""; myReportsLoading=true; myReportsLoaded=false; }
   render();
 }
@@ -993,11 +1021,9 @@ function setDashboardQuickFilter(kind){
 }
 function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
-  filters.from = $("flt-from")?.value ?? filters.from;
-  filters.to = $("flt-to")?.value ?? filters.to;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; filters=blankDashboardFilters(); render(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1025,10 +1051,8 @@ function dashboardModel(){
     (!isReq || !filters.acc || (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc)) &&
     (!isReq || !filters.dur || c.accommodation_duration===filters.dur) &&
     (!filters.us || c.us_state===filters.us) &&
-    (!filters.region || caseRegion(c)===filters.region) &&
-    (!filters.district || caseDistrict(c)===filters.district) &&
-    (!filters.from || new Date(c.created_at).getTime() >= new Date(filters.from + "T00:00:00").getTime()) &&
-    (!filters.to || new Date(c.created_at).getTime() <= new Date(filters.to + "T23:59:59").getTime()) &&
+    (!filters.leader || caseDistrictLeader(c)===filters.leader) &&
+    caseOpenedInPeriod(c, filters.period) &&
     (!q || [c.ref,c.description,c.location,dashboardInvolved(c)].some(v => (v||"").toLowerCase().includes(q)))
   );
   return { isReq, pool, shown, now };
@@ -1044,14 +1068,16 @@ function dashboardFilterChipEntries(){
   const labels = {
     risk:"Risk", cat:isReq?"Request type":"Category", state:isReq?"Request status":"Status",
     handler:isReq?"Case owner":"Handler", acc:"Outcome", dur:"Duration", us:"Location state",
-    region:"Region", district:"District", from:"Opened after", to:"Opened before"
+    leader:"District leader", period:"Period"
   };
-  for (const key of ["risk","cat","state","handler","acc","dur","us","region","district","from","to"]){
+  for (const key of ["risk","cat","state","handler","acc","dur","us","leader","period"]){
     if (!filters[key]) continue;
     let value = filters[key];
     if (key === "handler") value = value === "__ext" ? "External advisor" : nameOf(value);
     if (key === "acc" && value === "__none") value = "Not yet decided";
     if (key === "state") value = stlabel(value);
+    if (key === "leader") value = districtLeaderLabel(value);
+    if (key === "period") value = FISCAL_PERIODS[value]?.label || value;
     entries.push({ key, label:`${labels[key]}: ${value}` });
   }
   return entries;
@@ -1154,10 +1180,8 @@ async function renderDashboardInto(el){
           <label class="filter-field"><span>Duration</span><select data-filter-key="dur" onchange="setFilter('dur',this.value);applyFilters()"><option value="">All durations</option>${ACC_DURATION.map(d=>`<option ${filters.dur===d?'selected':''}>${d}</option>`).join("")}</select></label>`:""}
           <label class="filter-field"><span>${isReq?'Case owner':'Handler'}</span><select data-filter-key="handler" onchange="setFilter('handler',this.value);applyFilters()"><option value="">All</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select></label>
           <label class="filter-field"><span>Location state</span><select data-filter-key="us" onchange="setFilter('us',this.value);applyFilters()"><option value="">All states</option>${statesList.map(s=>`<option ${filters.us===s?'selected':''}>${s}</option>`).join("")}</select></label>
-          <label class="filter-field"><span>Region</span><select data-filter-key="region" onchange="setFilter('region',this.value);applyFilters()"><option value="">All regions</option>${[...REGIONS,"Other"].map(r=>`<option ${filters.region===r?'selected':''}>${r}</option>`).join("")}</select></label>
-          <label class="filter-field"><span>District</span><select data-filter-key="district" onchange="setFilter('district',this.value);applyFilters()"><option value="">All districts</option>${[...DISTRICTS,"Other"].map(d=>`<option ${filters.district===d?'selected':''}>${esc(d)}</option>`).join("")}</select></label>
-          <label class="filter-field"><span>Opened after</span><input id="flt-from" data-filter-key="from" type="date" value="${esc(filters.from||'')}" onchange="applyFilters()"></label>
-          <label class="filter-field"><span>Opened before</span><input id="flt-to" data-filter-key="to" type="date" value="${esc(filters.to||'')}" onchange="applyFilters()"></label>
+          <label class="filter-field filter-wide-mobile"><span>District leader</span><select id="flt-leader" data-filter-key="leader" onchange="setFilter('leader',this.value);applyFilters()"><option value="">All district leaders</option>${[...DISTRICT_LEADERS,"Other"].map(d=>`<option value="${esc(d)}" ${filters.leader===d?'selected':''}>${esc(districtLeaderLabel(d))}</option>`).join("")}</select></label>
+          <label class="filter-field filter-wide-mobile"><span>Period</span><select id="flt-period" data-filter-key="period" onchange="setFilter('period',this.value);applyFilters()"><option value="">All periods</option>${Object.entries(FISCAL_PERIODS).map(([key,p])=>`<option value="${key}" ${filters.period===key?'selected':''}>${esc(p.label)}</option>`).join("")}</select></label>
         </div>
       </div>
     </div>
@@ -1477,6 +1501,7 @@ function clearLegalFilters(){ lgFilters={q:"",state:"",risk:"",status:"",type:""
 async function renderLegalInto(el){
   const epoch = sessionEpoch;
   const dv = dashView;                       // stale-paint guard (QC 8/31)
+  const userId = session?.user?.id;
   const { data:list, error } = await sb.from("legal_cases").select("*").order("ref");
   if (epoch !== sessionEpoch || dashView !== dv || !el.isConnected) return;  // view/session changed while loading
   if (error){
@@ -1501,6 +1526,32 @@ async function renderLegalInto(el){
   // saving it would target the missing id. Drop back to the list instead.
   if (lgSelected && lgSelected !== "new" && !rows.some(r => r.id === lgSelected)) lgSelected = null;
   const sel = lgSelected && lgSelected !== "new" ? rows.find(r => r.id === lgSelected) : null;
+  if (sel) {
+    const stillCurrent = () => epoch === sessionEpoch && session?.user?.id === userId
+      && dashView === dv && lgSelected === sel.id && el.isConnected;
+    const [notesResult, filesResult] = await Promise.all([
+      sb.from("legal_case_notes").select("*").eq("legal_case_id",sel.id).order("created_at",{ascending:true}),
+      listLegalDocuments(sel.id, stillCurrent),
+    ]);
+    if (!stillCurrent() || filesResult.stale) return;
+    legalDetail = {
+      notes: notesResult.data || [],
+      files: filesResult.data || [],
+      errors: [notesResult.error ? "HR notes are unavailable until the Legal Claims detail migration is deployed." : "",
+               filesResult.error ? "Related document storage is not available yet." : ""].filter(Boolean),
+    };
+  } else {
+    legalDetail = { notes:[], files:[], errors:[] };
+  }
+  if (lgSelected) {
+    el.innerHTML = lgSelected === "new" || lgEditing ? lgEditor(sel) : lgSummary(sel);
+    if (legalPreview.open) requestAnimationFrame(() => { setLegalPreviewBackgroundInert(true); $("lg-preview-close")?.focus(); });
+    else if (legalPreviewRestoreName) requestAnimationFrame(() => {
+      const name=legalPreviewRestoreName; legalPreviewRestoreName="";
+      [...document.querySelectorAll("button[data-p]")].find(button=>button.dataset.p===name)?.focus();
+    });
+    return;
+  }
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
@@ -1528,11 +1579,88 @@ async function renderLegalInto(el){
       </div>
       <div id="legal-active-filters" class="active-filter-list" aria-live="polite">${legalFilterChipsHtml()}</div>
     </div>
-    ${lgSelected ? lgEditor(sel) : ""}
     <div class="card" style="padding:8px 0;overflow-x:auto"><table>
       <thead><tr><th style="padding-left:20px">Case ID</th><th>Risk</th><th>Status</th><th>Complainant</th><th>Type</th><th>Opposing counsel / agency</th><th>Company counsel</th><th>EB point</th><th>Due date</th><th>Docs</th></tr></thead>
       <tbody id="legal-table-body">${legalRowsHtml(model)}</tbody>
     </table></div>`;
+}
+const legalDocumentName = name => String(name||"").replace(/^[0-9a-f-]{36}_/i,"");
+async function listLegalDocuments(caseId, isCurrent=()=>true){
+  const prefix = `legal/${caseId}`;
+  const pageSize = 100;
+  const files = [];
+  for (let offset=0; offset<5000; offset+=pageSize){
+    const result = await sb.storage.from("evidence").list(prefix,{limit:pageSize,offset,sortBy:{column:"created_at",order:"desc"}});
+    if (!isCurrent()) return {data:[],error:null,stale:true};
+    if (result.error) return {...result,stale:false};
+    const page = result.data || [];
+    files.push(...page);
+    if (page.length < pageSize) return {data:files,error:null,stale:false};
+  }
+  return {data:files,error:{message:"More than 5,000 legal documents were found; narrow storage cleanup is required."},stale:false};
+}
+const legalDocumentKind = name => {
+  const ext = String(name||"").split(".").pop().toLowerCase();
+  if (["png","jpg","jpeg","gif","webp"].includes(ext)) return "image";
+  if (["pdf","txt","csv"].includes(ext)) return "frame";
+  return "download";
+};
+function lgSummary(r){
+  if (!r) return "";
+  if (legalComposer.caseId !== r.id) legalComposer = {caseId:r.id,note:"",files:[],status:"",error:"",noteError:"",retry:false};
+  const due = r.due_date ? fmtDateOnly(r.due_date) : (r.due_date_note || "—");
+  const docs = legalDetail.files.length ? legalDetail.files.map(f=>{
+    const display = legalDocumentName(f.name);
+    const kind = legalDocumentKind(display);
+    return `<div class="task"><span><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+      <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+        ${kind!=="download"?`<button class="btn sm sec" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgPreviewDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Preview</button>`:""}
+        <button class="btn sm ghost" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgDownloadDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Download</button>
+      </span></div>`;
+  }).join("") : '<span class="muted">No related documents uploaded.</span>';
+  return `<button class="back" onclick="lgClose()">← Back to legal cases</button>
+    <div class="card legal-summary">
+      <div class="legal-summary-head"><div><span class="ref" style="font-size:16px">${esc(r.ref)}</span> ${lgStatusPill(r.status)} ${riskPill(r.risk_level)} ${r.case_state==='Completed'?'<span class="chip">Completed</span>':''}</div>
+        <button class="btn sm ghost" onclick="lgEdit()">Edit details</button></div>
+      <h2 class="section">${esc(r.complainant || r.claim_type || "Legal / claims case")}</h2>
+      <div class="row">
+        <div class="col">
+          <div class="kv"><span class="k">Complainant</span><b>${esc(r.complainant||'—')}</b></div>
+          <div class="kv"><span class="k">Type</span><span>${esc(r.claim_type||'—')}</span></div>
+          <div class="kv"><span class="k">Case state</span><span>${esc(r.case_state||'—')}</span></div>
+          <div class="kv"><span class="k">Due date</span><span class="${lgDue(r)?'pill due-over':''}">${esc(due)}</span></div>
+        </div>
+        <div class="col">
+          <div class="kv"><span class="k">Opposing side</span><span>${esc(r.opposing_counsel||'—')}</span></div>
+          <div class="kv"><span class="k">Company counsel</span><span>${esc(r.company_counsel||'—')}</span></div>
+          <div class="kv"><span class="k">EB point</span><span>${esc(r.eb_point||'—')}</span></div>
+          <div class="kv"><span class="k">EPLI tendered</span><span>${esc(r.epli_tendered||'—')}</span></div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="mini-l">Synopsis</div><div class="banner desc">${esc(r.synopsis||'No synopsis recorded.')}</div>
+      <div class="grid2 legal-summary-notes">
+        <div><div class="mini-l">Pending action</div><div class="detail-copy">${esc(r.pending_action||'—')}</div></div>
+        <div><div class="mini-l">EPLI coverage notes</div><div class="detail-copy">${esc(r.epli_notes||'—')}</div></div>
+      </div>
+    </div>
+    ${legalDetail.errors.map(m=>`<div class="banner warn">${esc(m)}</div>`).join("")}
+    <div class="row legal-detail-row">
+      <div class="col card"><div class="legal-section-head"><b>HR notes</b><span class="chip">internal · append-only</span></div>
+        <div style="margin-top:12px">${legalDetail.notes.length?legalDetail.notes.map(n=>{const person=dirList.find(d=>(d.email||"").toLowerCase()===(n.author_email||"").toLowerCase());return `<div class="hrnote"><div class="t">${esc(person?.name||n.author_email||'HR')} · ${fmt(n.created_at)}</div>${esc(n.body)}</div>`;}).join(""):'<span class="muted">No HR notes yet.</span>'}</div>
+        <div class="legal-note-compose"><textarea id="lg-hr-note" placeholder="Add an internal note…" rows="3" oninput="lgSetNoteDraft(this.value)">${esc(legalComposer.note)}</textarea><button id="lg-note-action" class="btn sec" aria-busy="${legalBusy.note}" ${legalBusy.note?'disabled':''} onclick="lgAddNote('${esc(r.id)}')">${legalBusy.note?'Adding…':'Add note'}</button></div>
+        <div id="lg-note-status" aria-live="polite">${legalComposer.noteError?`<div class="banner err">${esc(legalComposer.noteError)}</div>`:""}</div>
+      </div>
+      <div class="col card"><div class="legal-section-head"><b>Related documents</b><span class="chip">private</span></div>
+        ${r.docs_link?`<div class="kv"><span class="k">Existing folder</span><span>${lgDocsCell(r.docs_link)}</span></div>`:""}
+        <div style="margin-top:12px">${docs}</div>
+        <div class="legal-upload"><input id="lg-files" type="file" multiple aria-describedby="lg-staged-files lg-doc-status" onchange="lgSetFiles(this)"><button id="lg-upload-action" class="btn sm sec" aria-busy="${legalBusy.upload}" ${legalBusy.upload?'disabled':''} onclick="lgUploadDocuments('${esc(r.id)}')">${legalBusy.upload?'Uploading…':legalComposer.retry?'Retry failed files':'Upload'}</button></div>
+        <div class="note-sm" id="lg-staged-files">${legalComposer.files.length?`${legalComposer.retry?'Retry queue (stored safely in this tab)':'Selected for upload'}: ${legalComposer.files.map(f=>esc(f.name)).join(", ")}`:""}</div>
+        <p class="note-sm">PDFs, images, text, and CSV files preview here. Other file types remain available to download.</p>
+        <div id="lg-doc-status" aria-live="polite">${legalComposer.status?`<div class="banner ok">${esc(legalComposer.status)}</div>`:""}${legalComposer.error?`<div class="banner err">${esc(legalComposer.error)}</div>`:""}</div>
+      </div>
+    </div>
+    ${legalPreview.open?lgPreviewModal():""}`;
 }
 function lgEditor(r){
   const v = k => esc(r ? (r[k] ?? "") : "");
@@ -1545,10 +1673,10 @@ function lgEditor(r){
       l.map(o=>`<option value="${esc(o)}" ${cur===o?'selected':''}>${esc(o)}</option>`).join("");
   };
   return `<div class="card">
-    <div style="display:flex;align-items:center;gap:10px">
+    <div class="legal-editor-head" style="display:flex;align-items:center;gap:10px">
       <b style="font-size:16px">${r ? `${esc(r.ref)} — edit case` : "New legal / claims case"}</b>
       ${r && lgDue(r) ? '<span class="pill due-over">Due follow-up</span>' : ""}
-      <button class="btn sm ghost" style="margin-left:auto" onclick="lgClose()">Cancel</button>
+      <button class="btn sm ghost" style="margin-left:auto" onclick="lgCancelEdit()">Cancel</button>
       <button class="btn sm" onclick="lgSave()">${r?"Save changes":"Create case"}</button>
     </div>
     <div class="rule"></div>
@@ -1578,19 +1706,22 @@ function lgEditor(r){
       <div><label>Due date</label><input id="lg-due_date" type="date" value="${d('due_date')}"></div>
       <div><label>Due date note <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">(original text when the date was messy)</span></label><input id="lg-due_date_note" type="text" value="${v('due_date_note')}"></div>
     </div>
-    <div><label>Related documents folder link</label><input id="lg-docs_link" type="text" value="${v('docs_link')}" placeholder="https://…"></div>
-    <div><label>Notes on structure</label><textarea id="lg-notes" rows="2">${v('notes')}</textarea></div>
+    <div><label>Existing related documents folder link</label><input id="lg-docs_link" type="text" value="${v('docs_link')}" placeholder="https://…"></div>
     <div id="lg-err"></div>
-    <div class="mobile-form-actions"><button class="btn ghost" onclick="lgClose()">Cancel</button><button class="btn" onclick="lgSave()">${r?"Save changes":"Create case"}</button></div>
+    <div class="mobile-form-actions"><button class="btn ghost" onclick="lgCancelEdit()">Cancel</button><button class="btn" onclick="lgSave()">${r?"Save changes":"Create case"}</button></div>
   </div>`;
 }
-function lgOpen(id){ lgSelected = id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function lgClose(){ lgSelected = null; render(); }
+function blankLegalComposer(caseId=null){ return {caseId,note:"",files:[],status:"",error:"",noteError:"",retry:false}; }
+function blankLegalPreview(){ return {open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; }
+function lgOpen(id){ lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
+function lgClose(){ lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
+function lgEdit(){ if(lgSelected && lgSelected!=="new"){ lgEditing=true; render(); } }
+function lgCancelEdit(){ if(lgSelected==="new") lgClose(); else { lgEditing=false; render(); } }
 async function lgSave(){
   const F = ["case_state","risk_level","status","complainant","claim_type",
     "opposing_counsel","company_counsel","eb_point","synopsis",
     "epli_tendered","epli_notes","pending_action",
-    "due_date","due_date_note","docs_link","notes"];
+    "due_date","due_date_note","docs_link"];
   const p = {};
   for (const f of F) p[f] = ($("lg-"+f)?.value ?? "").trim();
   const err = m => { const el=$("lg-err"); el.innerHTML = `<div class="banner err">${esc(m)}</div>`; el.scrollIntoView({behavior:"smooth",block:"center"}); };
@@ -1599,7 +1730,140 @@ async function lgSave(){
   if (!p.complainant && !p.synopsis){ err("Enter a complainant or a synopsis."); return; }
   const { error } = await sb.rpc("legal_save", { p_id: lgSelected === "new" ? null : lgSelected, p });
   if (error){ err(errText(error)); return; }
-  lgSelected = null; render();
+  if (lgSelected === "new") lgSelected = null;
+  lgEditing = false; render();
+}
+function legalStoragePath(caseId, storedName){
+  const id = String(caseId||"");
+  const name = String(storedName||"");
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(id) || !name || /[\\/]/.test(name) || name === "." || name === "..") return null;
+  return `legal/${id}/${name}`;
+}
+function legalUploadName(fileName){
+  const cleaned = String(fileName||"document").replace(/[\\/\x00-\x1f\x7f]/g,"_").slice(-180) || "document";
+  const unique = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${unique}_${cleaned}`;
+}
+function legalActionContext(caseId){
+  const epoch=sessionEpoch, userId=session?.user?.id;
+  const sameIdentity=()=>epoch===sessionEpoch && session?.user?.id===userId
+    && lgSelected===caseId && legalComposer.caseId===caseId;
+  return { sameIdentity, visible:()=>sameIdentity() && view==="dashboard" && dashView==="legal" };
+}
+function lgSetNoteDraft(value){
+  if (legalComposer.caseId===lgSelected) legalComposer.note=String(value||"");
+}
+function lgSetFiles(input){
+  if (legalComposer.caseId!==lgSelected) return;
+  legalComposer.files=Array.from(input?.files||[]); legalComposer.status=""; legalComposer.error=""; legalComposer.retry=false;
+  const staged=$("lg-staged-files");
+  const label=legalComposer.files.length?`Selected for upload: ${legalComposer.files.map(f=>f.name).join(", ")}`:"";
+  if(staged) staged.textContent=label;
+}
+function setLegalActionBusy(kind, active){
+  const button=$(kind==="note"?"lg-note-action":"lg-upload-action");
+  if(button){ button.disabled=active; button.setAttribute("aria-busy",String(active)); button.textContent=active?(kind==="note"?"Adding…":"Uploading…"):(kind==="note"?"Add note":legalComposer.retry?"Retry failed files":"Upload"); }
+  const status=$(kind==="note"?"lg-note-status":"lg-doc-status");
+  if(active && status) status.innerHTML=`<span class="note-sm">${kind==="note"?"Adding note…":"Uploading documents…"}</span>`;
+}
+async function lgAddNote(caseId){
+  if (legalBusy.note || legalComposer.caseId!==caseId) return;
+  const body = legalComposer.note.trim();
+  if (!body) return;
+  const ctx=legalActionContext(caseId);
+  legalBusy.note=true; legalComposer.noteError=""; setLegalActionBusy("note",true);
+  const { error } = await sb.rpc("legal_add_note",{p_legal_case_id:caseId,p_body:body});
+  if (!ctx.sameIdentity()) return;
+  legalBusy.note=false; setLegalActionBusy("note",false);
+  if (error){ legalComposer.noteError=errText(error); if(ctx.visible()) render(); return; }
+  legalComposer.note=""; if(ctx.visible()) render();
+}
+function finishLegalUpload(ctx, failures, uploaded, paused=false){
+  legalBusy.upload=false; legalComposer.retry=legalComposer.files.length>0; setLegalActionBusy("upload",false);
+  legalComposer.status=uploaded?`${uploaded} document${uploaded===1?"":"s"} uploaded successfully.`:"";
+  const messages=[];
+  if(failures.length) messages.push(`${failures.length} failed: ${failures.join("; ")}.`);
+  if(paused && legalComposer.files.length) messages.push(`Upload paused after leaving Legal & Claims; ${legalComposer.files.length} file${legalComposer.files.length===1?" remains":"s remain"} in the retry queue.`);
+  else if(failures.length) messages.push(`Select “Retry failed files” to retry only ${failures.length===1?"this file":"these files"}.`);
+  legalComposer.error=messages.join(" ");
+  if(ctx.visible()) render();
+}
+async function lgUploadDocuments(caseId){
+  if (legalBusy.upload || legalComposer.caseId!==caseId) return;
+  const files = [...legalComposer.files];
+  if (!files.length) return;
+  const oversized=files.find(file=>file.size>25*1024*1024);
+  if(oversized){ legalComposer.error=`${oversized.name} is larger than the 25 MB limit.`; legalComposer.status=""; legalComposer.retry=false; render(); return; }
+  const ctx=legalActionContext(caseId);
+  legalBusy.upload=true; legalComposer.error=""; legalComposer.status=""; setLegalActionBusy("upload",true);
+  const failures=[];
+  let uploaded=0;
+  for (const file of files){
+    if (!ctx.sameIdentity()) return;
+    if (!ctx.visible()){ finishLegalUpload(ctx,failures,uploaded,true); return; }
+    const storedName = legalUploadName(file.name);
+    const path = legalStoragePath(caseId,storedName);
+    if (!path){ failures.push(`${file.name}: document name could not be prepared safely`); continue; }
+    const { error } = await sb.storage.from("evidence").upload(path,file,{upsert:false,contentType:file.type||undefined});
+    if (!ctx.sameIdentity()) return;
+    if (error){ failures.push(`${file.name}: ${error.message||"unknown error"}`); continue; }
+    uploaded += 1;
+    legalComposer.files=legalComposer.files.filter(candidate=>candidate!==file);
+    if (!ctx.visible()){ finishLegalUpload(ctx,failures,uploaded,true); return; }
+  }
+  if (!ctx.sameIdentity()) return;
+  finishLegalUpload(ctx,failures,uploaded,false);
+}
+async function lgDownloadDocument(caseId, storedName, displayName){
+  const path = legalStoragePath(caseId,storedName);
+  if (!path){ alert("This document path is invalid."); return; }
+  const ctx=legalActionContext(caseId);
+  const { data, error } = await sb.storage.from("evidence").download(path);
+  if (!ctx.visible()) return;
+  if (error || !data){ alert("Could not download this document: " + (error?.message||"unknown error")); return; }
+  downloadBlob(data,displayName||legalDocumentName(storedName));
+}
+async function lgPreviewDocument(caseId, storedName, displayName){
+  const path = legalStoragePath(caseId,storedName);
+  const kind = legalDocumentKind(displayName||storedName);
+  if (!path || kind === "download"){ alert("Preview is not available for this file type. Download the document instead."); return; }
+  const ctx=legalActionContext(caseId);
+  const generation=++legalPreviewGeneration;
+  const { data, error } = await sb.storage.from("evidence").createSignedUrl(path,120);
+  if (!ctx.visible() || generation!==legalPreviewGeneration) return;
+  if (error || !data?.signedUrl){ alert("Could not create a private preview link: " + (error?.message||"unknown error")); return; }
+  legalPreview = {open:true,caseId,storedName,name:displayName||legalDocumentName(storedName),url:data.signedUrl,kind};
+  render();
+}
+function setLegalPreviewBackgroundInert(active){
+  if (!active){
+    document.querySelectorAll('[data-legal-preview-inert="1"]').forEach(el=>{ el.inert=false; delete el.dataset.legalPreviewInert; });
+    return;
+  }
+  document.querySelectorAll("header.top, nav, #app > *:not(.legal-preview-overlay)").forEach(el=>{
+    el.inert=true; el.dataset.legalPreviewInert="1";
+  });
+}
+function handleLegalPreviewKeydown(event){
+  if (!legalPreview.open) return;
+  if(event.key==="Escape"){ event.preventDefault(); event.stopPropagation(); lgClosePreview(); return; }
+  if(event.key!=="Tab") return;
+  const controls=[$("lg-preview-download"),$("lg-preview-close")].filter(Boolean);
+  if(!controls.length) return;
+  const first=controls[0], last=controls.at(-1), active=document.activeElement;
+  if(event.shiftKey && (active===first || !controls.includes(active))){ event.preventDefault(); last.focus(); }
+  else if(!event.shiftKey && (active===last || !controls.includes(active))){ event.preventDefault(); first.focus(); }
+}
+function lgClosePreview(){ legalPreviewRestoreName=legalPreview.storedName||""; setLegalPreviewBackgroundInert(false); legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
+function lgPreviewModal(){
+  return `<div class="modal-overlay legal-preview-overlay" role="presentation" onclick="if(event.target===this)lgClosePreview()">
+    <div class="modal legal-preview-modal" role="dialog" aria-modal="true" aria-label="Preview ${esc(legalPreview.name)}">
+      <div class="legal-section-head"><div><div class="mini-l">Document preview</div><b>${esc(legalPreview.name)}</b></div><span style="display:flex;gap:6px"><button id="lg-preview-download" class="btn sm ghost" data-p="${esc(legalPreview.storedName)}" data-n="${esc(legalPreview.name)}" onclick="lgDownloadDocument('${esc(legalPreview.caseId)}',this.dataset.p,this.dataset.n)">Download</button><button id="lg-preview-close" class="btn sm ghost" autofocus onclick="lgClosePreview()">Close</button></span></div>
+      <div class="legal-preview-canvas">${legalPreview.kind==="image"
+        ? `<img src="${esc(legalPreview.url)}" alt="Preview of ${esc(legalPreview.name)}" referrerpolicy="no-referrer">`
+        : `<iframe src="${esc(legalPreview.url)}" title="Preview of ${esc(legalPreview.name)}" sandbox referrerpolicy="no-referrer" tabindex="-1"></iframe>`}</div>
+      <p class="note-sm">Private preview links expire after two minutes.</p>
+    </div></div>`;
 }
 
 // 8/18 call: cases are NEVER deleted from the UI any more — a bad/duplicate
@@ -2624,8 +2888,8 @@ const csvCell = v => {
 };
 function exportCasesCsv(){
   const cols = DASH_CASE_COLS.split(",");
-  const header = [...cols, "region", "district"];
-  const rows = lastShown.map(c => [...cols.map(k => csvCell(c[k])), csvCell(caseRegion(c)), csvCell(caseDistrict(c))].join(","));
+  const header = [...cols, "district_leader"];
+  const rows = lastShown.map(c => [...cols.map(k => csvCell(c[k])), csvCell(districtLeaderLabel(caseDistrictLeader(c)))].join(","));
   // BOM so Excel detects UTF-8; CRLF line endings for the same reason
   const csv = "\uFEFF" + [header.join(","), ...rows].join("\r\n") + "\r\n";
   downloadBlob(new Blob([csv], {type:"text/csv;charset=utf-8"}), `hr-cases-${todayStr()}.csv`);
@@ -2677,7 +2941,7 @@ ${sec("Overview", `<table class="kv">
   ${kv("Closure categorization", c.closure_category ? esc(c.closure_category)+(c.closure_ref?` — duplicate of ${esc(c.closure_ref)}`:"") : "—")}
   ${isReq?"":kv(L(c,'riskCol'), dash(caseRisk(c)))}
   ${kv("Location", dash(c.location)+(c.us_state?`, ${esc(c.us_state)}`:""))}
-  ${kv("Region / District", esc(caseRegion(c))+" · "+esc(caseDistrict(c)))}
+  ${kv("District leader", esc(districtLeaderLabel(caseDistrictLeader(c))))}
   ${kv("Opened", esc(fmtD(c.created_at)))}
   ${isReq?"":kv("Occurred", c.incident_date?esc(fmtDateOnly(c.incident_date)):"—")}
   ${kv("Closed", c.closed_at?esc(fmtD(c.closed_at)):"—")}
