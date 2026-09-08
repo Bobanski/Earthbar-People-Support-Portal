@@ -372,7 +372,7 @@ let qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
 let dashView = "cases";
 let receipt = null, statusResult = null, myReports = [], myReportsError = "", myReportsLoading = true, myReportsLoaded = false;
 let myReportsPromise = null;
-const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", period:"", acc:"", dur:"", us:"", leader:"", quick:"" });
+const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", period:"", acc:"", dur:"", us:"", leader:"", quick:"", mine:"" });
 let filters = blankDashboardFilters();
 let dashboardData = [];
 // 8/18 call: state changes need a second "save" click before anything is
@@ -524,7 +524,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
   toggleTask, evDownload, caseFileDownload,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply,
-  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
+  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
@@ -1019,6 +1019,10 @@ function setDashboardQuickFilter(kind){
   filters.quick = filters.quick === kind ? "" : kind;
   updateDashboardResults();
 }
+function toggleMyWork(){
+  filters.mine = filters.mine ? "" : "yes";
+  updateDashboardResults();
+}
 function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
@@ -1030,6 +1034,26 @@ function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(t
 // Module-level: also the raw column list for the CSV export.
 const DASH_CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
 const dashboardOverdue = (c, now=Date.now()) => (c.tasks||[]).some(t => t.status==="open" && t.due_at && new Date(t.due_at).getTime() < now);
+// This is a view of already-authorized rows, never an authorization substitute.
+// Fail closed when the signed-in email has no unique directory employee match.
+function myWorkEmployeeId(){
+  const email = (session?.user?.email || "").trim().toLowerCase();
+  if (!email || !isHandler) return null;
+  const matches = dirList.filter(d => (d.email || "").trim().toLowerCase() === email);
+  return matches.length === 1 ? matches[0].employee_id || null : null;
+}
+function myWorkDeadline(c){
+  const due = (c.tasks || []).filter(t => t.status === "open" && t.due_at)
+    .map(t => Date.parse(t.due_at)).filter(Number.isFinite);
+  return due.length ? Math.min(...due) : Infinity;
+}
+function compareMyWork(a, b, now){
+  const rank = c => ({High:0, Medium:1, Low:2}[caseRisk(c)] ?? 3);
+  const opened = c => Number.isFinite(Date.parse(c.created_at)) ? Date.parse(c.created_at) : Infinity;
+  return Number(dashboardOverdue(b,now)) - Number(dashboardOverdue(a,now)) ||
+    rank(a) - rank(b) || myWorkDeadline(a) - myWorkDeadline(b) ||
+    opened(a) - opened(b) || String(a.id).localeCompare(String(b.id));
+}
 const dashboardInvolved = c => (c.case_parties||[]).map(p =>
   p.party_type==="customer" || (!p.subject_id && p.display_name) ? `${p.display_name||"Customer"} (customer)` : nameOf(p.subject_id)
 ).filter(Boolean).join(", ");
@@ -1039,7 +1063,9 @@ function dashboardModel(){
   const pool = dashboardData.filter(c => isReq ? c.intake_type === "request" : c.intake_type !== "request");
   const now = Date.now();
   const q = filters.q.trim().toLowerCase();
+  const employeeId = filters.mine ? myWorkEmployeeId() : null;
   const shown = pool.filter(c =>
+    (!filters.mine || (employeeId && c.handler_id === employeeId && !c.external && c.state !== "Closed")) &&
     (!filters.quick ||
       (filters.quick==="open" && c.state!=="Closed") ||
       (!isReq && filters.quick==="high" && caseRisk(c)==="High") ||
@@ -1055,6 +1081,7 @@ function dashboardModel(){
     caseOpenedInPeriod(c, filters.period) &&
     (!q || [c.ref,c.description,c.location,dashboardInvolved(c)].some(v => (v||"").toLowerCase().includes(q)))
   );
+  if (filters.mine) shown.sort((a,b) => compareMyWork(a,b,now));
   return { isReq, pool, shown, now };
 }
 function dashboardFilterChipEntries(){
@@ -1063,6 +1090,7 @@ function dashboardFilterChipEntries(){
     ? { open:"Open requests" }
     : { open:"Open cases", high:"High risk", overdue:"SLA overdue" };
   const entries = [];
+  if (filters.mine) entries.push({ key:"mine", label:"My Work: open, assigned to me" });
   if (filters.quick && quickLabels[filters.quick]) entries.push({ key:"quick", label:quickLabels[filters.quick] });
   if (filters.q.trim()) entries.push({ key:"q", label:`Search: “${filters.q.trim()}”` });
   const labels = {
@@ -1117,11 +1145,20 @@ function updateDashboardResults(){
   if (activeFilters) activeFilters.innerHTML = dashboardActiveFiltersHtml();
   const toggle = $("filter-toggle");
   if (toggle) toggle.textContent = filterButtonText();
+  const mine = $("my-work-toggle");
+  if (mine) { mine.classList.toggle("ghost", !filters.mine); mine.setAttribute("aria-pressed", String(!!filters.mine)); }
+  const mineHint = $("my-work-hint");
+  if (mineHint) { mineHint.hidden = !filters.mine; mineHint.textContent = myWorkHint(); }
   document.querySelectorAll("[data-quick-filter]").forEach(tile => {
     const active = filters.quick === tile.dataset.quickFilter;
     tile.classList.toggle("active", active);
     tile.setAttribute("aria-pressed", String(active));
   });
+}
+function myWorkHint(){
+  return myWorkEmployeeId()
+    ? "My Work shows open items assigned to you in this tab, with any other filters applied. Order: overdue first, then risk (High, Medium, Low, unset), earliest open-task deadline, then oldest opened."
+    : "My Work is unavailable because your sign-in could not be matched to one directory employee. Ask an administrator to check your directory email. Clear My Work to return to all accessible items.";
 }
 async function renderDashboardInto(el){
   const epoch = sessionEpoch;
@@ -1164,10 +1201,12 @@ async function renderDashboardInto(el){
       </div>
       <div class="rule"></div>
       <div class="dash-actions">
+         <button id="my-work-toggle" class="btn sm ${filters.mine?'':'ghost'}" aria-pressed="${!!filters.mine}" onclick="toggleMyWork()">My Work</button>
          <button id="filter-toggle" class="btn sm ghost" aria-controls="dashboard-filters" aria-expanded="${showFilters}" onclick="toggleFilters()">${filterButtonText()}</button>
         <button class="btn sm ghost" onclick="exportCasesCsv()">Export CSV</button>
         ${!isReq?`<button class="btn sm sec" style="margin-left:auto" onclick="toggleManual()">${showManual?'Cancel manual entry':(hasManualDraft()?'Resume draft case':'+ Add case manually')}</button>`:""}
       </div>
+      <p id="my-work-hint" class="note-sm" ${filters.mine?'':'hidden'}>${esc(myWorkHint())}</p>
       <div id="dashboard-active-filters" class="active-filter-list" aria-live="polite">${dashboardActiveFiltersHtml()}</div>
       <div id="dashboard-filters" class="filters filter-panel ${showFilters?'is-open':''}" aria-hidden="${!showFilters}" ${showFilters?'':'inert'}>
         <div class="filter-panel-head"><div><b>Filter this dashboard</b><div id="dashboard-result-count" class="note-sm">Showing ${shown.length} of ${pool.length} ${isReq?'requests':'cases'}</div></div><button class="btn sm ghost" onclick="clearDashboardFilters()">Clear all</button></div>
