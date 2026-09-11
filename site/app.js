@@ -28,6 +28,7 @@ import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { DISTRICT_LEADERS, storeOrg } from "./store_org.js";
 import { STORE_LOCATIONS } from "./store_locations.js";
 import { makeZip } from "./minizip.js";
+import { ER_STATEMENT_GUIDE, STATEMENT_TEMPLATE_FILENAME, STATEMENT_TEMPLATE_BUCKET, STATEMENT_TEMPLATE_OBJECT, configureStatementTemplate, clearStatementTemplate, buildBlankBlob, buildFilledBlob } from "./statement_template.js";
 
 const cfg = window.EARTHBAR_CONFIG || {};
 // --- SESSION POLICY ---------------------------------------------------------
@@ -394,6 +395,11 @@ let legalBusy = { note:false, upload:false };
 let legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" };
 let legalPreviewGeneration = 0;
 let legalPreviewRestoreName = "";
+let attachmentPreview = { open:false, name:"", url:"", text:"", kind:"", note:"", download:null, restoreId:"" };
+let attachmentPreviewGeneration = 0;
+let attachmentPreviewObjectUrl = "";
+let messageThread = { key:"", caseId:null, claimCode:null, messages:[], body:"", files:[], busy:false, error:"", status:"", requestId:null, prepared:null, uploaded:[] };
+let messageThreadGeneration = 0;
 let closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
 let lastShown = [];        // rows currently visible on the cases/requests dashboard (feeds Export CSV)
 let caseExport = null;     // everything fetched for the open case detail (feeds Export case .zip)
@@ -405,11 +411,46 @@ let partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[],
 let evidenceRetry = { caseId:null, files:[] };
 let activeUserId = null, sessionEpoch = 0;
 let interviewSavePromises = new Map();
+let interviewDrafts = new Map();
+let statementTemplatePromise = null;
+const MEDICAL_FUNCTION = "medical-documents";
+const MEDICAL_FILE_RULES = { maxBytes:10*1024*1024, mimeByExtension:{
+  pdf:["application/pdf"], png:["image/png"], jpg:["image/jpeg"], jpeg:["image/jpeg"],
+  docx:["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+} };
+function takeMedicalInviteToken(){
+  const raw=location.hash.startsWith("#")?location.hash.slice(1):"";
+  if(!raw)return "";
+  const params=new URLSearchParams(raw);
+  const token=params.get("medical-return")||params.get("medical_return")||params.get("medicalReturn")||"";
+  if(!token)return "";
+  history.replaceState(history.state,"",location.pathname+location.search);
+  return token;
+}
+let medicalInviteToken=takeMedicalInviteToken();
+let medicalInvite={status:"",error:"",request:null,documents:[],files:[],kind:"accommodation",label:"",busy:false,generation:0};
+let medicalPanel={caseId:null,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",status:"",error:"",busy:false},audit:[],retention:[],generation:0};
+
+function blankMedicalPanel(caseId=null){return {caseId,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",status:"",error:"",busy:false},audit:[],retention:[],generation:medicalPanel.generation+1};}
+function medicalCurrent(caseId,generation,epoch,userId){return selected===caseId&&medicalPanel.caseId===caseId&&medicalPanel.generation===generation&&sessionEpoch===epoch&&session?.user?.id===userId;}
+function medicalError(result){return result?.error||result?.data?.error||null;}
+async function medicalAction(body){
+  const result=await sb.functions.invoke(MEDICAL_FUNCTION,{body});
+  let error=medicalError(result);
+  if(result?.error?.context&&typeof result.error.context.json==="function"){
+    try{const payload=await result.error.context.clone().json();error=payload?.error||error;}catch{}
+  }
+  const data=!error&&["commit_upload","commit_return_upload"].includes(body?.action)
+    ? (result.data?.document||result.data) : result.data;
+  return {data:error?null:data,error};
+}
 
 function verifiedEmail(){ return (session?.user?.email || "").trim().toLowerCase(); }
 function canUseDirectorySearch(){ return !!session; }
-function resetSessionState(){
+function resetSessionState(preserveMedicalInvite=false){
+  statementTemplatePromise=null; clearStatementTemplate();
   setLegalPreviewBackgroundInert(false);
+  closeAttachmentPreview(false);
   clearTimeout(idleExpiryTimer); idleExpiryTimer = null;
   clearTimeout(trustedExpiryTimer); trustedExpiryTimer = null;
   trustedSessionDeadline = 0;
@@ -433,6 +474,7 @@ function resetSessionState(){
   lgEditing = false; legalDetail = { notes:[], files:[], errors:[] };
   legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false }; legalBusy = { note:false, upload:false };
   legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1;
+  messageThread = blankMessageThread(); messageThreadGeneration += 1;
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
   caseExportInProgress = false; caseExportGeneration += 1;
@@ -441,6 +483,12 @@ function resetSessionState(){
   partySearchResults = []; partySearchError = "";
   partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
   interviewSavePromises.clear();
+  interviewDrafts.clear();
+  medicalPanel=blankMedicalPanel();
+  if(!preserveMedicalInvite){
+    medicalInviteToken="";
+    medicalInvite={status:"",error:"",request:null,documents:[],files:[],kind:"accommodation",label:"",busy:false,generation:medicalInvite.generation+1};
+  }
 }
 
 function todayStr(){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
@@ -522,8 +570,9 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
-  toggleTask, evDownload, caseFileDownload,
-  openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply,
+  syncInterviewDraft, addInterviewPair, removeInterviewPair, moveInterviewPair, downloadBlankStatement, downloadFilledStatement,
+  toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
+  openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
@@ -532,7 +581,11 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   exportCasesCsv, exportCaseZip, assertCaseZipBudget,
   saveRisk, savePolicies, uploadCaseEvidence,
   togglePartyEditor, setPartyEditRole, onPartyEditInput, pickPartyEditEmployee, removePartyEdit, savePartyEdit,
-  onLookupInput, pickLookup, backToLookup, retryMyReports, retryEvidenceUploads });
+  onLookupInput, pickLookup, backToLookup, retryMyReports, retryEvidenceUploads,
+  setMessageBody, setMessageFiles, sendMessageWithAttachments, previewMessageAttachment, downloadMessageAttachment, closeAttachmentPreview, downloadOpenAttachment,
+  loadMedicalPanel, startMedicalMfa, verifyMedicalMfa, setMedicalFiles, uploadMedicalFiles, previewMedicalDocument, downloadMedicalDocument,
+  setMedicalInviteField, createMedicalReturnRequest, resendMedicalReturnRequest, toggleMedicalLegalHold, loadMedicalAudit, previewMedicalRetention, enqueueMedicalRetention,
+  setMedicalReturnFiles, submitMedicalReturnFiles });
 
 // ---------------- AUTH / BOOTSTRAP ----------------
 async function boot(){
@@ -540,6 +593,7 @@ async function boot(){
     document.addEventListener(eventName, recordUserActivity, true);
   }
   document.addEventListener("keydown", handleLegalPreviewKeydown, true);
+  document.addEventListener("keydown", handleAttachmentPreviewKeydown, true);
   window.addEventListener("storage", event => {
     if (event.key === CROSS_TAB_SIGNOUT_KEY && event.newValue) {
       void acceptCrossTabSignOut();
@@ -578,7 +632,7 @@ async function boot(){
   sb.auth.onAuthStateChange((_e, s) => {
     const nextUserId = s?.user?.id || null;
     if(nextUserId !== activeUserId){
-      resetSessionState();
+      resetSessionState(!activeUserId && !!nextUserId && !!medicalInviteToken);
       activeUserId = nextUserId;
       if(nextUserId) touchLastSeen();
     }
@@ -672,6 +726,7 @@ function tabs(){
   return t;
 }
 function go(v){
+  closeAttachmentPreview(false);
   if ((v==="dashboard"||v==="lookup") && !isHandler) v="home";
   if (showManual){ syncManualFields(); flushManualDraft(true); }   // nav closes the form — persist the debounce tail first
   view=v; clearSelectedCaseState(); receipt=null; errorMsg=""; showManual=false;
@@ -680,7 +735,7 @@ function go(v){
   render();
 }
 function renderNav(){
-  $("nav").innerHTML = session ? tabs().map(t=>`<button class="${view===t.id?'active':''}" onclick="go('${t.id}')">${t.label}</button>`).join("") : "";
+  $("nav").innerHTML = session && !medicalInviteToken ? tabs().map(t=>`<button class="${view===t.id?'active':''}" onclick="go('${t.id}')">${t.label}</button>`).join("") : "";
 }
 function renderUserBox(){
   const el = $("userbox"); if (!el) return;
@@ -1027,7 +1082,7 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1905,6 +1960,172 @@ function lgPreviewModal(){
     </div></div>`;
 }
 
+// ---- private file preview shared by case, email, and message attachments ----
+// HTML, SVG, and Office files intentionally stay download-only. Text is fetched
+// and escaped into <pre>; PDFs run in a sandboxed frame; common raster formats
+// render as images. Every caller must authorize the exact file for its surface.
+function attachmentKind(name,type=""){
+  const ext=String(name||"").split(".").pop().toLowerCase();
+  if(["png","jpg","jpeg","gif","webp"].includes(ext) && /^image\/(png|jpeg|gif|webp)$/i.test(type||`image/${ext==='jpg'?'jpeg':ext}`)) return "image";
+  if(ext==="pdf" && (!type || type==="application/pdf")) return "pdf";
+  if(["txt","csv"].includes(ext) && (!type || /^text\/(plain|csv)$/i.test(type))) return "text";
+  if(["mp3","wav","ogg","m4a"].includes(ext) && (!type || /^audio\/(mpeg|wav|ogg|mp4|x-m4a)$/i.test(type))) return "audio";
+  if(["mp4","webm"].includes(ext) && (!type || /^(video\/(mp4|webm)|audio\/mp4)$/i.test(type))) return "video";
+  return "download";
+}
+function attachmentPreviewHtml(){
+  const p=attachmentPreview;
+  const body=p.kind==="image"?`<img src="${esc(p.url)}" alt="Preview of ${esc(p.name)}" referrerpolicy="no-referrer">`
+    :p.kind==="pdf"?`<iframe src="${esc(p.url)}" title="Preview of ${esc(p.name)}" sandbox referrerpolicy="no-referrer" tabindex="-1"></iframe>`
+    :p.kind==="audio"?`<audio src="${esc(p.url)}" controls preload="metadata" aria-label="Preview of ${esc(p.name)}"></audio>`
+    :p.kind==="video"?`<video src="${esc(p.url)}" controls preload="metadata" playsinline aria-label="Preview of ${esc(p.name)}"></video>`
+    :p.kind==="audio"?`<audio src="${esc(p.url)}" controls preload="metadata"></audio>`
+    :p.kind==="video"?`<video src="${esc(p.url)}" controls preload="metadata" playsinline></video>`
+    :`<pre class="attachment-text-preview">${esc(p.text)}</pre>`;
+  return `<div id="attachment-preview" class="modal-overlay legal-preview-overlay" role="presentation" onclick="if(event.target===this)closeAttachmentPreview()">
+    <div class="modal legal-preview-modal" role="dialog" aria-modal="true" aria-label="Preview ${esc(p.name)}">
+      <div class="legal-section-head"><div><div class="mini-l">Private document preview</div><b>${esc(p.name)}</b></div><span class="preview-actions"><button id="attachment-preview-download" class="btn sm ghost" onclick="downloadOpenAttachment()">Download</button><button id="attachment-preview-close" class="btn sm ghost" onclick="closeAttachmentPreview()">Close</button></span></div>
+      <div class="legal-preview-canvas">${body}</div><p class="note-sm">${esc(p.note||"Private access expires shortly. Download the original if preview is unavailable.")}</p>
+    </div></div>`;
+}
+function setAttachmentPreviewBackgroundInert(active){
+  document.querySelectorAll('[data-attachment-preview-inert="1"]').forEach(el=>{el.inert=false;delete el.dataset.attachmentPreviewInert;});
+  if(active) document.querySelectorAll("header.top, nav, main").forEach(el=>{el.inert=true;el.dataset.attachmentPreviewInert="1";});
+}
+async function openAttachmentPreview({name,type="",kindOverride="",authorize,download,restoreId="",isCurrent=()=>true}){
+  const kind=["image","pdf"].includes(kindOverride)?kindOverride:attachmentKind(name,type);
+  if(kind==="download"){ alert("Preview is not available for this file type. Download the original instead."); return; }
+  closeAttachmentPreview(false);
+  const epoch=sessionEpoch, generation=++attachmentPreviewGeneration;
+  let authorized;
+  try { authorized=await authorize(); } catch(error){ authorized={error}; }
+  if(epoch!==sessionEpoch || generation!==attachmentPreviewGeneration || !isCurrent()) return;
+  if(!authorized?.url){ alert("Could not create a private preview link: "+(authorized?.error?.message||authorized?.error||"unknown error")); return; }
+  let text="";
+  if(kind==="text"){
+    try {
+      const response=await fetch(authorized.url,{credentials:"omit",referrerPolicy:"no-referrer"});
+      if(!response.ok) throw new Error("preview download failed");
+      const blob=await response.blob();
+      if(blob.size>2*1024*1024) throw new Error("Text preview is limited to 2 MB");
+      text=await blob.text();
+    } catch(error){ if(epoch===sessionEpoch && generation===attachmentPreviewGeneration && isCurrent()) alert(`${error.message}. Download the original instead.`); return; }
+  }
+  if(epoch!==sessionEpoch || generation!==attachmentPreviewGeneration || !isCurrent()) return;
+  attachmentPreview={open:true,name,url:authorized.url,text,kind,note:authorized.note||"Private access expires shortly.",download,restoreId};
+  document.body.insertAdjacentHTML("beforeend",attachmentPreviewHtml());
+  setAttachmentPreviewBackgroundInert(true);
+  requestAnimationFrame(()=>$('attachment-preview-close')?.focus());
+}
+function handleAttachmentPreviewKeydown(event){
+  if(!attachmentPreview.open) return;
+  if(event.key==="Escape"){event.preventDefault();event.stopPropagation();closeAttachmentPreview();return;}
+  if(event.key!=="Tab") return;
+  const controls=[$("attachment-preview-download"),$("attachment-preview-close")].filter(Boolean);
+  const first=controls[0],last=controls.at(-1),active=document.activeElement;
+  if(event.shiftKey&&(active===first||!controls.includes(active))){event.preventDefault();last?.focus();}
+  else if(!event.shiftKey&&(active===last||!controls.includes(active))){event.preventDefault();first?.focus();}
+}
+function closeAttachmentPreview(restore=true){
+  const restoreId=attachmentPreview.restoreId;
+  attachmentPreviewGeneration+=1; attachmentPreview={open:false,name:"",url:"",text:"",kind:"",note:"",download:null,restoreId:""};
+  $("attachment-preview")?.remove(); setAttachmentPreviewBackgroundInert(false);
+  if(attachmentPreviewObjectUrl){URL.revokeObjectURL(attachmentPreviewObjectUrl);attachmentPreviewObjectUrl="";}
+  if(restore&&restoreId) requestAnimationFrame(()=>$(`${restoreId}`)?.focus());
+}
+async function downloadOpenAttachment(){
+  const action=attachmentPreview.download;
+  if(typeof action==="function") await action();
+}
+
+// ---- reporter-visible two-way messaging attachments -----------------------
+const MESSAGE_FILE_RULES={maxFiles:5,maxFileBytes:10*1024*1024,maxTotalBytes:25*1024*1024};
+const MESSAGE_MIME_BY_EXTENSION={pdf:["application/pdf"],png:["image/png"],jpg:["image/jpeg"],jpeg:["image/jpeg"],gif:["image/gif"],webp:["image/webp"],txt:["text/plain"],csv:["text/csv","text/plain"],doc:["application/msword"],docx:["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],xls:["application/vnd.ms-excel"],xlsx:["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]};
+function messageFileType(file){const name=String(file?.name||""),ext=name.includes(".")?name.split(".").pop().toLowerCase():"",raw=String(file?.type||"").toLowerCase();if(ext==="csv"&&raw==="application/vnd.ms-excel")return "text/csv";return raw||MESSAGE_MIME_BY_EXTENSION[ext]?.[0]||"";}
+function blankMessageThread(caseId=null,claimCode=null,caseRef=null){return {key:caseId||claimCode||caseRef?`${caseId||caseRef||"claim"}:${claimCode||"signed"}`:"",caseId,claimCode,caseRef,messages:[],body:"",files:[],busy:false,error:"",status:"",requestId:null,prepared:null,uploaded:[],snapshot:null};}
+function ensureMessageThread(caseId=null,claimCode=null,caseRef=null){
+  const key=caseId||claimCode||caseRef?`${caseId||caseRef||"claim"}:${claimCode||"signed"}`:"";
+  if(messageThread.key!==key) messageThread=blankMessageThread(caseId,claimCode,caseRef);
+  return messageThread;
+}
+async function messageAttachmentAction(body){
+  const {data,error}=await sb.functions.invoke("message-attachments",{body});
+  if(error){
+    let detail=null;
+    try{if(error.context?.clone)detail=await error.context.clone().json();}catch{}
+    const apiError=detail?.error||detail;
+    return {data:null,error:{code:apiError?.code||"INTERNAL",message:apiError?.message||error.message||"Message attachments are temporarily unavailable."}};
+  }
+  if(data?.error)return {data:null,error:data.error};
+  return {data,error:null};
+}
+async function loadMessageThread(caseId=null,claimCode=null,caseRef=null){
+  const thread=ensureMessageThread(caseId,claimCode,caseRef),generation=++messageThreadGeneration,epoch=sessionEpoch;
+  const {data,error}=await messageAttachmentAction({action:"list",mode:claimCode||caseRef?"reporter":"handler",...(caseId?{caseId}:{}),...(caseRef?{caseRef}:{}),...(claimCode?{claimCode}:{})});
+  if(epoch!==sessionEpoch||generation!==messageThreadGeneration||messageThread!==thread)return false;
+  if(error){thread.error="Messages could not be refreshed. "+error.message;return false;}
+  thread.messages=Array.isArray(data?.messages)?data.messages:[];thread.error="";return true;
+}
+function messageAttachmentHtml(file,caseId,claimCode,index,caseRef){
+  const kind=attachmentKind(file.name,file.type||""),id=String(file.id||"");
+  return `<span class="message-file"><span class="message-file-name">${esc(file.name)}</span><span class="muted">${fmtBytes(file.size)}</span><span class="file-actions">${kind!=="download"?`<button id="message-preview-${esc(id||index)}" class="btn sm sec" data-case="${esc(caseId||'')}" data-ref="${esc(caseRef||'')}" data-claim="${esc(claimCode||'')}" data-id="${esc(id)}" data-n="${esc(file.name)}" data-t="${esc(file.type||'')}" onclick="previewMessageAttachment(this.dataset.case,this.dataset.claim,this.dataset.id,this.dataset.n,this.dataset.t,this.id,this.dataset.ref)">Preview</button>`:""}<button class="btn sm ghost" data-case="${esc(caseId||'')}" data-ref="${esc(caseRef||'')}" data-claim="${esc(claimCode||'')}" data-id="${esc(id)}" data-n="${esc(file.name)}" onclick="downloadMessageAttachment(this.dataset.case,this.dataset.claim,this.dataset.id,this.dataset.n,this.dataset.ref)">Download</button></span></span>`;
+}
+function messageThreadHtml(caseId,claimCode,isHr,caseRef=null){
+  const thread=ensureMessageThread(caseId,claimCode,caseRef),messages=thread.messages||[];
+  return `<div class="msgwrap" style="margin:12px 0">${messages.length?messages.map((m,mi)=>`<div class="msg ${m.sender==='handler'?'handler':'reporter'}"><div class="who">${m.sender==='handler'?'HR':(isHr?'Reporter':'You')}${m.viaEmail?' · via email':''}</div>${m.body?linkify(m.body):''}${(m.attachments||[]).length?`<div class="message-files">${m.attachments.map((f,fi)=>messageAttachmentHtml(f,caseId,claimCode,`${mi}-${fi}`,caseRef)).join("")}</div>`:""}</div>`).join(""):'<span class="muted">No messages yet.</span>'}</div>
+    <div class="message-compose"><textarea id="message-body" rows="2" maxlength="10000" placeholder="${isHr?'Message the reporter…':'Reply to HR…'}" oninput="setMessageBody(this.value)">${esc(thread.body)}</textarea><input id="message-files" type="file" multiple aria-describedby="message-file-list message-status" onchange="setMessageFiles(this)"><button id="message-send" class="btn ${isHr?'':'sec'}" aria-busy="${thread.busy}" ${thread.busy?'disabled':''} onclick="sendMessageWithAttachments()">${thread.busy?'Sending…':'Send'}</button></div>
+    <div id="message-file-list" class="note-sm">${thread.files.length?`Selected: ${thread.files.map(f=>esc(f.name)).join(", ")}`:"Attach up to 5 files (10 MB each, 25 MB total). A message may contain files without text."}</div>
+    <div id="message-status" aria-live="polite">${thread.status?`<div class="banner ok">${esc(thread.status)}</div>`:""}${thread.error?`<div class="banner err">${esc(thread.error)}</div>`:""}</div>`;
+}
+function setMessageBody(value){if(!messageThread.snapshot)messageThread.body=String(value||"");}
+function validateMessageFiles(files){
+  if(files.length>MESSAGE_FILE_RULES.maxFiles)return "Attach no more than 5 files to one message.";
+  let total=0;
+  for(const file of files){const name=String(file.name||"").trim(),ext=name.includes(".")?name.split(".").pop().toLowerCase():"",type=messageFileType(file);if(!name||name.length>180||/[\\/\x00-\x1f]/.test(name))return "Each attachment needs a safe filename of 180 characters or fewer.";if(!file.size)return `${file.name} is empty and cannot be attached.`;if(file.size>MESSAGE_FILE_RULES.maxFileBytes)return `${file.name} is larger than 10 MB.`;if(!MESSAGE_MIME_BY_EXTENSION[ext]?.includes(type))return `${file.name} is not an allowed file type. Use PDF, image, text, CSV, Word, or Excel files.`;total+=file.size;}
+  return total>MESSAGE_FILE_RULES.maxTotalBytes?"The selected files are larger than the 25 MB message limit.":"";
+}
+function setMessageFiles(input){
+  if(messageThread.snapshot)return;
+  const files=Array.from(input?.files||[]),error=validateMessageFiles(files);
+  if(error){messageThread.error=error;input.value="";}else{messageThread.files=files;messageThread.error="";messageThread.status="";}
+  paintMessageComposer();
+}
+function paintMessageComposer(){
+  const t=messageThread,list=$("message-file-list"),status=$("message-status"),button=$("message-send"),body=$("message-body"),file=$("message-files");
+  if(list)list.textContent=t.files.length?`Selected: ${t.files.map(f=>f.name).join(", ")}`:"Attach up to 5 files (10 MB each, 25 MB total). A message may contain files without text.";
+  if(status)status.innerHTML=`${t.status?`<div class="banner ok">${esc(t.status)}</div>`:""}${t.error?`<div class="banner err">${esc(t.error)}</div>`:""}`;
+  if(button){button.disabled=t.busy;button.setAttribute("aria-busy",String(t.busy));button.textContent=t.busy?"Sending…":t.snapshot?"Retry send":"Send";}
+  if(body)body.disabled=t.busy||!!t.snapshot;if(file)file.disabled=t.busy||!!t.snapshot;
+}
+function messageRequestId(){
+  if(globalThis.crypto?.randomUUID)return crypto.randomUUID();
+  if(!globalThis.crypto?.getRandomValues)return null;
+  const bytes=crypto.getRandomValues(new Uint8Array(16));bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const hex=[...bytes].map(value=>value.toString(16).padStart(2,"0"));return `${hex.slice(0,4).join("")}-${hex.slice(4,6).join("")}-${hex.slice(6,8).join("")}-${hex.slice(8,10).join("")}-${hex.slice(10).join("")}`;
+}
+async function sendMessageWithAttachments(){
+  const thread=messageThread;if(thread.busy||(!thread.caseId&&!thread.claimCode&&!thread.caseRef))return;
+  if(!thread.snapshot){thread.body=$("message-body")?.value??thread.body;const body=thread.body.trim(),fileError=validateMessageFiles(thread.files);if(thread.body.length>10000){thread.error="Messages are limited to 10,000 characters.";paintMessageComposer();return;}if(fileError){thread.error=fileError;paintMessageComposer();return;}if(!body&&!thread.files.length){thread.error="Write a message or attach at least one file.";paintMessageComposer();return;}thread.requestId=messageRequestId();if(!thread.requestId){thread.error="Secure message sending is unavailable in this browser.";paintMessageComposer();return;}thread.snapshot={body,files:[...thread.files]};}
+  const epoch=sessionEpoch,generation=messageThreadGeneration,key=thread.key,snapshot=thread.snapshot,userId=session?.user?.id;
+  const stillCurrent=()=>epoch===sessionEpoch&&generation===messageThreadGeneration&&session?.user?.id===userId&&messageThread===thread&&thread.key===key
+    && (thread.claimCode||thread.caseRef?view==="status":view==="dashboard"&&selected===thread.caseId);
+  thread.busy=true;thread.error="";thread.status="";paintMessageComposer();
+  try{
+    const auth={mode:thread.claimCode||thread.caseRef?"reporter":"handler",...(thread.claimCode?{claimCode:thread.claimCode}:thread.caseRef?{caseRef:thread.caseRef}:thread.caseId?{caseId:thread.caseId}:{})};
+    if(!thread.prepared){const {data,error}=await messageAttachmentAction({action:"prepare",...auth,requestId:thread.requestId,files:snapshot.files.map((f,i)=>({clientId:String(i),name:f.name,type:messageFileType(f),size:f.size}))});if(!stillCurrent())return;if(error)throw Object.assign(new Error(error.message),{code:error.code});thread.prepared=data;thread.uploaded=(data.files||[]).filter(file=>file.uploaded===true).map(file=>file.attachmentId);}
+    if(thread.prepared)for(const target of thread.prepared.files||[]){if(!stillCurrent())return;if(target.uploaded===true||thread.uploaded.includes(target.attachmentId))continue;const file=snapshot.files[Number(target.clientId)],bucket=target.bucket||"message-attachments";const {error}=await sb.storage.from(bucket).uploadToSignedUrl(target.path,target.token,file,{contentType:target.type||messageFileType(file)});if(!stillCurrent())return;if(error){thread.prepared=null;thread.uploaded=[];throw new Error(`${file.name} could not be uploaded. ${error.message||"Try again."}`);}thread.uploaded.push(target.attachmentId);}
+    if(!stillCurrent())return;
+    const {error}=await messageAttachmentAction({action:"commit",...auth,requestId:thread.requestId,uploadId:thread.prepared?.uploadId||null,body:snapshot.body});if(error)throw Object.assign(new Error(error.message),{code:error.code});
+    if(!stillCurrent())return;
+    thread.body="";thread.files=[];thread.requestId=null;thread.prepared=null;thread.uploaded=[];thread.snapshot=null;thread.status="Message sent.";await loadMessageThread(thread.caseId,thread.claimCode,thread.caseRef);
+    if(epoch!==sessionEpoch||messageThread.key!==key)return;if(isHandler&&selected===thread.caseId)render();else if(view==="status")render();
+  }catch(error){if(!stillCurrent())return;if(["UPLOAD_EXPIRED","UPLOAD_INCOMPLETE","INVALID_FILE","INVALID_REQUEST"].includes(error.code)){thread.prepared=null;thread.uploaded=[];thread.requestId=null;thread.snapshot=null;}thread.error=(error.message||"The message could not be sent.")+" Your text and files are still here; retry when ready.";paintMessageComposer();}
+  finally{if(epoch===sessionEpoch&&messageThread.key===key){thread.busy=false;paintMessageComposer();}}
+}
+async function authorizeMessageAttachment(caseId,claimCode,attachmentId,caseRef){const {data,error}=await messageAttachmentAction({action:"download",mode:claimCode||caseRef?"reporter":"handler",...(claimCode?{claimCode}:caseRef?{caseRef}:caseId?{caseId}:{}),attachmentId});return {url:data?.url,error,note:"Private download access expires after one minute."};}
+async function previewMessageAttachment(caseId,claimCode,attachmentId,name,type,restoreId,caseRef){const key=messageThread.key;await openAttachmentPreview({name,type,restoreId,isCurrent:()=>messageThread.key===key&&(view==="status"||selected===caseId),authorize:()=>authorizeMessageAttachment(caseId,claimCode,attachmentId,caseRef),download:()=>downloadMessageAttachment(caseId,claimCode,attachmentId,name,caseRef)});}
+async function downloadMessageAttachment(caseId,claimCode,attachmentId,name,caseRef){const epoch=sessionEpoch,key=messageThread.key,userId=session?.user?.id;const authorized=await authorizeMessageAttachment(caseId,claimCode,attachmentId,caseRef);if(epoch!==sessionEpoch||session?.user?.id!==userId||messageThread.key!==key||(claimCode||caseRef?view!=="status":view!=="dashboard"||selected!==caseId))return;if(!authorized.url){alert("Could not authorize this download: "+(authorized.error?.message||"unknown error"));return;}const a=document.createElement("a");a.href=authorized.url;a.download=name||"attachment";a.target="_blank";a.rel="noopener noreferrer";document.body.appendChild(a);a.click();a.remove();}
+
 // 8/18 call: cases are NEVER deleted from the UI any more — a bad/duplicate
 // case should be categorized (e.g. "faulty") instead. The delete_case RPC still
 // exists server-side but the dashboard no longer offers it. The "faulty"
@@ -1912,10 +2133,12 @@ function lgPreviewModal(){
 function clearSelectedCaseState(){
   selected=null; pendingAdvance=null; showReassign=false; showGuide=false;
   caseExport=null; caseAllegs=[]; evidence={list:[],err:""};
+  interviewDrafts.clear();
   partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
+  medicalPanel=blankMedicalPanel();
 }
-function openCase(id){ clearSelectedCaseState(); selected=id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function closeCase(){ clearSelectedCaseState(); render(); }
+function openCase(id){ closeAttachmentPreview(false); clearSelectedCaseState(); selected=id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
+function closeCase(){ closeAttachmentPreview(false); clearSelectedCaseState(); render(); }
 
 // ---- manual case entry (for reports that reach People Support by email) ---
 // Everything typed here is mirrored into `manual` and auto-saved to sessionStorage
@@ -2279,15 +2502,19 @@ async function renderCaseDetailInto(el, id){
     sb.from("corrective_actions").select("*").eq("case_id",id).order("created_at",{ascending:true}),
     // email-intake attachment metadata (migration 019) — degrades to empty pre-019
     sb.from("case_files").select("*").eq("case_id",id).order("created_at",{ascending:true}),
+    messageAttachmentAction({action:"list",mode:"handler",caseId:id}),
   ]);
   const [{data:c}, {data:parties}, {data:events}, {data:tasks}, {data:messages}, {data:notes},
-         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}] = detailResults;
+         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}, messageResult] = detailResults;
   const detailLabels = ["case", "team members", "timeline", "tasks", "messages", "HR notes",
     "allegations", "interviews", "corrective actions", "email attachments"];
-  const exportLoadErrors = detailResults.flatMap((result, index)=>result.error ? [detailLabels[index]] : []);
+  const exportLoadErrors = detailResults.slice(0,detailLabels.length).flatMap((result, index)=>result.error ? [detailLabels[index]] : []);
   if (epoch !== sessionEpoch || selected !== id || !el.isConnected) return;  // stale-paint/session guard
   caseAllegs = allegs || [];   // used by the close modal gate
   if(!c){ el.innerHTML=`<button class="back" onclick="closeCase()">← Back</button><div class="card"><div class="banner warn">This case isn't available to you.</div></div>`; return; }
+  const thread=ensureMessageThread(id,null);
+  if(messageResult.error) thread.error="Messages could not be refreshed. "+messageResult.error.message;
+  else {thread.messages=messageResult.data?.messages||[];thread.error="";}
   // evidence list (bucket may not exist pre-v2 — degrade quietly)
   sb.storage.from("evidence").list(id).then(({data,error})=>{
     if(epoch !== sessionEpoch || selected !== id) return;
@@ -2387,6 +2614,9 @@ async function renderCaseDetailInto(el, id){
     </div>
     <div style="margin-top:14px"><button class="btn sm" onclick="saveAccommodation('${c.id}')">Save accommodation details</button></div>
   </div>`:""}
+  <section id="medical-panel" class="card medical-panel" aria-label="Confidential medical documents">
+    ${medicalPanelShellHtml(id)}
+  </section>
   <div class="row">
     <div class="col card"><b>${L(c,'evidence')}</b>
       <div id="ev-list" style="margin-top:10px">${evidenceHtml(id)}</div>
@@ -2405,34 +2635,17 @@ async function renderCaseDetailInto(el, id){
       <span>${esc(f.file_name)}<span class="muted" style="font-size:11px"> · ${fmtBytes(f.size_bytes)}${f.source==='email'?' · email':''}${f.uploaded_by?' · from '+esc(f.uploaded_by):''}</span></span>
       <span class="due">${f.created_at?fmt(f.created_at):''}</span>
       ${f.storage_path
-        ? `<button class="btn sm ghost" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" onclick="caseFileDownload(this.dataset.p,this.dataset.n)">Download</button>`
+        ? `<span class="file-actions">${attachmentKind(f.file_name)!=="download"?`<button id="case-file-preview-${esc(f.id)}" class="btn sm sec" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" data-t="${esc(f.mime_type||'')}" onclick="caseFilePreview(this.dataset.p,this.dataset.n,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" onclick="caseFileDownload(this.dataset.p,this.dataset.n)">Download</button></span>`
         : (f.email_fallback_url && f.email_fallback_url.startsWith('https://')  // scheme guard (QC 8/31): never render a javascript:/data: href
             ? `<a class="btn sm ghost" href="${esc(f.email_fallback_url)}" target="_blank" rel="noopener noreferrer">Open in mailbox</a>`
             : '<span class="muted" style="font-size:11px">stored in mailbox</span>')}
     </div>`).join("")}
     <p class="note-sm" style="margin-top:8px">Files that arrived by email. Ones too large to store open in the peoplesupport@ mailbox instead (original emails are retained there).</p>
     </div></div>`:""}
-  ${!isReq?`<div class="card"><b>Interviews</b> <span class="chip">internal — HR team only</span>
-    <p class="note-sm" style="margin-top:4px">Prepare questions in Notes before the call and type during it — notes save when you click away from the box (and with Save). Unlike evidence, these stay editable.</p>
+  ${!isReq?`<div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Interviews</b> <span class="chip">internal — HR team only</span><button class="btn sm ghost" style="margin-left:auto" onclick="downloadBlankStatement()">Download blank ER statement</button></div>
+    <p class="note-sm" style="margin-top:4px">Working notes stay editable and separate from the statement responses. Every structured response and local interview detail is saved with this interview.</p>
     <div style="margin-top:10px">
-    ${(ivs||[]).length?(ivs||[]).map(iv=>`
-      <div class="iv-row" id="iv-${iv.id}">
-        <div class="iv-grid">
-          <span><span class="mini-l">Person interviewed</span><input id="iv-name-${iv.id}" type="text" value="${esc(iv.interviewee)}"></span>
-          <span><span class="mini-l">Role in case</span><select id="iv-role-${iv.id}">${[...new Set([...PARTY_ROLES, ...(iv.role_in_case?[iv.role_in_case]:[]), "Other"])].map(r=>`<option value="${r}" ${iv.role_in_case===r?'selected':''}>${rlabel(r)}</option>`).join("")}</select></span>
-          <span><span class="mini-l">Date</span><input id="iv-date-${iv.id}" type="date" value="${esc(iv.interview_date||'')}"></span>
-          <span><span class="mini-l">Interviewer</span><input id="iv-by-${iv.id}" type="text" value="${esc(iv.interviewer||'')}"></span>
-          <span><span class="mini-l">Status</span><select id="iv-status-${iv.id}">${INTERVIEW_STATUS.map(s=>`<option ${iv.status===s?'selected':''}>${s}</option>`).join("")}</select></span>
-          <span><span class="mini-l">Follow-up needed</span><input id="iv-fu-${iv.id}" type="text" value="${esc(iv.follow_up||'')}" placeholder="e.g. get schedule records"></span>
-        </div>
-        <span class="mini-l" style="margin-top:8px">Questions &amp; notes</span>
-        <textarea id="iv-notes-${iv.id}" style="min-height:90px" onblur="saveInterviewUI('${c.id}','${iv.id}',true)">${esc(iv.notes||'')}</textarea>
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <button class="btn sm sec" onclick="saveInterviewUI('${c.id}','${iv.id}')">Save</button>
-          <span class="muted" id="iv-saved-${iv.id}" style="font-size:12px;align-self:center"></span>
-          <button class="btn sm ghost" style="margin-left:auto" onclick="deleteInterviewUI('${iv.id}')">Remove</button>
-        </div>
-      </div>`).join(""):'<p class="muted">No interviews yet.</p>'}
+    ${(ivs||[]).length?(ivs||[]).map(iv=>interviewEditorHtml(c.id,iv)).join(""):'<p class="muted">No interviews yet.</p>'}
     </div>
     <div class="divider"></div>
     <span class="mini-l">Add an interview</span>
@@ -2440,6 +2653,12 @@ async function renderCaseDetailInto(el, id){
       <span><span class="mini-l">Person interviewed</span><input id="ni-name" type="text" placeholder="Name"></span>
       <span><span class="mini-l">Role in case</span><select id="ni-role">${[...PARTY_ROLES,"Other"].map(r=>`<option value="${r}">${rlabel(r)}</option>`).join("")}</select></span>
       <span><span class="mini-l">Date</span><input id="ni-date" type="date"></span>
+      <span><span class="mini-l">Local time</span><input id="ni-time" type="time"></span>
+      <span><span class="mini-l">IANA time zone</span>${timezoneSelectHtml("ni-zone",browserTimeZone())}</span>
+      <span><span class="mini-l">Format</span><select id="ni-format"><option value="">Not recorded</option>${INTERVIEW_FORMATS.map(v=>`<option>${v}</option>`).join("")}</select></span>
+      <span><span class="mini-l">Duration (minutes)</span><input id="ni-duration" type="number" min="1" max="1440"></span>
+      <span><span class="mini-l">Interviewee title</span><input id="ni-title" type="text"></span>
+      <span><span class="mini-l">Interviewee location</span><input id="ni-location" type="text"></span>
       <span><span class="mini-l">Interviewer</span><input id="ni-by" type="text" value="${esc(me?.name||'')}"></span>
     </div>
     <div style="margin-top:10px"><button class="btn sm" onclick="addInterviewUI('${c.id}')">Add interview</button></div>
@@ -2480,18 +2699,114 @@ async function renderCaseDetailInto(el, id){
     ${(events||[]).map(e=>`<li><div class="t">${fmt(e.at)} · ${esc(e.type)}</div><div class="e">${esc(e.note)}</div></li>`).join("")}
   </ul></div>
   <div class="card"><b>Messages ${c.anonymous?'<span class="chip">relayed — reporter stays anonymous</span>':''}</b>
-    <div class="msgwrap" style="margin:12px 0">${(messages||[]).length?messages.map(m=>`<div class="msg ${m.sender_type}"><div class="who">${m.sender_type==='handler'?esc(handlerName):m.sender_type==='email'?('Email · '+esc(m.sender_email||'external')):((c.anonymous?'Anonymous reporter':esc(c.reporter_display||'Reporter'))+(m.via_email?' · via email (unverified sender)':''))}</div>${linkify(m.body)}</div>`).join(""):'<span class="muted">No messages yet.</span>'}</div>
+    ${messageThreadHtml(id,null,true)}
     <p class="note-sm">Messages are also emailed to the reporter automatically${c.anonymous?" — without revealing their address to you":""}.</p>
-    <div style="display:flex;gap:8px"><input id="hmsg" type="text" placeholder="Message the reporter…"><button class="btn" onclick="sendHandlerMsg('${c.id}')">Send</button></div>
   </div>
   ${closeModal.open?renderCloseModal():""}`;
+  if(medicalPanel.caseId!==id||medicalPanel.status==="idle") void loadMedicalPanel(id);
 }
+
+function medicalPanelShellHtml(caseId){
+  if(medicalPanel.caseId!==caseId||medicalPanel.status==="idle"||medicalPanel.status==="loading")return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Confidential medical documents</b></div><span class="spin" aria-label="Checking access"></span></div><p class="note-sm">Checking your access to this separate document area…</p>`;
+  const code=medicalPanel.error?.code||"";
+  if(medicalPanel.status==="error"){
+    if(code==="MFA_REQUIRED")return medicalMfaHtml(caseId);
+    const copy=code==="NOT_MEDICAL_STAFF"?"Your account is not assigned to the medical-document team."
+      :code==="CASE_UNAVAILABLE"?"This medical file area is unavailable. The case may be outside your assignment or access may have changed."
+      :code==="AUTH_REQUIRED"?"Sign in again before opening confidential medical documents."
+      :"The confidential medical file service is not configured or is temporarily unavailable.";
+    return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Confidential medical documents</b></div><span class="chip">separate access</span></div><div class="banner ${code==="NOT_MEDICAL_STAFF"||code==="CASE_UNAVAILABLE"?'warn':'err'}">${esc(copy)}</div>${!['NOT_MEDICAL_STAFF','CASE_UNAVAILABLE','AUTH_REQUIRED'].includes(code)?`<button class="btn sm ghost" onclick="loadMedicalPanel('${caseId}')">Retry confidential area</button>`:""}<p class="note-sm">The rest of this case remains available according to your usual case access.</p>`;
+  }
+  const permissions=medicalPanel.capabilities?.permissions||{};
+  return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Confidential medical documents</b></div><span class="chip">MFA verified</span></div>
+    <div class="banner info medical-boundary"><b>Separate from case evidence.</b> Files here are available only through this restricted panel and are excluded from the ordinary case ZIP export.</div>
+    ${permissions.upload?`<div class="medical-upload"><label for="medical-files">Add medical documents</label><input id="medical-files" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.doc,.docx" onchange="setMedicalFiles(this.files)"><div class="row"><div class="col"><span class="mini-l">Document kind</span><select id="medical-kind"><option value="accommodation">Accommodation</option><option value="fmla">FMLA</option><option value="provider_note">Provider note</option><option value="certification">Certification</option><option value="other">Other medical document</option></select></div><div class="col"><span class="mini-l">Display label (optional)</span><input id="medical-label" maxlength="120" type="text" autocomplete="off"></div></div><button class="btn sm" ${medicalPanel.busy?'disabled aria-busy="true"':''} onclick="uploadMedicalFiles('${caseId}')">${medicalPanel.busy?'Uploading…':'Upload to restricted vault'}</button><span id="medical-upload-status" class="note-sm" role="status">${esc(medicalPanel.status==="upload-error"?medicalPanel.error?.message||"Upload failed.":"")}</span></div>`:""}
+    <div class="divider"></div><div class="medical-section-head"><b>Documents</b><span class="muted">${medicalPanel.documents.length}</span></div>
+    ${medicalPanel.documents.length?medicalPanel.documents.map((d,i)=>medicalDocumentHtml(caseId,d,i,permissions)).join(""):'<p class="muted">No restricted medical documents have been added.</p>'}
+    ${permissions.invite?medicalReturnRequestsHtml(caseId):""}
+    ${permissions.retention?medicalOperationsHtml(caseId):""}`;
+}
+function medicalMfaHtml(caseId){
+  const m=medicalPanel.mfa;
+  if(!m.mode)return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Identity check required</b></div><span class="chip">MFA</span></div><p>This confidential area requires a current code from an authenticator app.</p><button class="btn sm" onclick="startMedicalMfa('${caseId}')">Continue with authenticator</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">This extra step applies only to the restricted medical-document team.</p>`;
+  const qr=/^data:image\/svg\+xml(?:;charset=utf-8|;utf-?8)?,/i.test(m.qr||"")?`<img class="medical-qr" src="${esc(m.qr)}" alt="Authenticator enrollment QR code" referrerpolicy="no-referrer">`:"";
+  return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>${m.mode==="enroll"?'Set up an authenticator':'Enter your authenticator code'}</b></div><span class="chip">MFA</span></div>${m.mode==="enroll"?`<p>Scan this code in an authenticator app. If scanning fails, enter the setup key manually.</p>${qr}<div class="codebox medical-secret"><span class="mini-l">Setup key</span><code>${esc(m.secret)}</code></div>`:`<p>Open your authenticator app and enter its current six-digit code.</p>`}<label for="medical-mfa-code">Six-digit code</label><input id="medical-mfa-code" class="otp-code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"><button class="btn sm" ${m.busy?'disabled aria-busy="true"':''} onclick="verifyMedicalMfa('${caseId}')">${m.busy?'Checking…':m.mode==="enroll"?'Enable and open documents':'Verify and open documents'}</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">Authenticator setup stays in memory only and is cleared when you sign out or leave this case.</p>`;
+}
+function medicalPreviewKind(d){return d?.mimeType==="application/pdf"?"pdf":/^image\/(png|jpeg)$/i.test(d?.mimeType||"")?"image":"download";}
+function medicalDocumentHtml(caseId,d,index,permissions){
+  const kind=medicalPreviewKind(d);
+  return `<div class="task medical-document"><span><b>${esc(d.label||"Medical document")}</b><span class="muted" style="font-size:11px"> · ${esc(d.kind||"document")} · ${fmtBytes(d.sizeBytes)} · ${d.createdAt?fmt(d.createdAt):""}</span>${d.legalHold?'<span class="chip">hold</span>':''}</span><span class="file-actions">${kind!=="download"?`<button id="medical-preview-${index}" class="btn sm sec" onclick="previewMedicalDocument('${caseId}','${esc(d.id)}',this.id)">Preview</button>`:""}<button class="btn sm ghost" onclick="downloadMedicalDocument('${caseId}','${esc(d.id)}')">Download</button>${permissions.retention?`<button class="btn sm ghost" onclick="toggleMedicalLegalHold('${caseId}','${esc(d.id)}',${!d.legalHold})">${d.legalHold?'Release hold':'Place hold'}</button>`:""}</span></div>`;
+}
+function medicalReturnRequestsHtml(caseId){
+  const inv=medicalPanel.invite;
+  return `<div class="divider"></div><div class="medical-section-head"><b>Request documents from employee</b><span class="chip">verified recipient</span></div><p class="note-sm">The invitation is bound to this case, expires, and opens only for the signed-in recipient email. “Requested by” is an administrative follow-up date, not a legal deadline, and passing it does not automatically deny a request.</p><div class="row"><div class="col"><span class="mini-l">Recipient email</span><input id="medical-invite-email" type="email" value="${esc(inv.email)}" autocomplete="off" oninput="setMedicalInviteField('email',this.value)"></div><div class="col"><span class="mini-l">Document purpose</span><select id="medical-invite-kind" onchange="setMedicalInviteField('kind',this.value)"><option value="accommodation" ${inv.kind==='accommodation'?'selected':''}>Accommodation</option><option value="fmla" ${inv.kind==='fmla'?'selected':''}>Medical leave (FMLA)</option></select></div><div class="col"><span class="mini-l">Requested by (days)</span><input id="medical-invite-days" type="number" min="${inv.kind==='fmla'?15:1}" max="90" value="${esc(inv.dueDays)}" oninput="setMedicalInviteField('dueDays',this.value)"></div><div class="col"><span class="mini-l">Or requested-by date</span><input id="medical-invite-date" type="date" value="${esc(inv.dueAt)}" oninput="setMedicalInviteField('dueAt',this.value)"></div></div><span class="mini-l">Message (optional)</span><textarea id="medical-invite-message" maxlength="1000" oninput="setMedicalInviteField('message',this.value)">${esc(inv.message)}</textarea><button class="btn sm" ${inv.busy?'disabled aria-busy="true"':''} onclick="createMedicalReturnRequest('${caseId}')">${inv.busy?'Creating…':'Create secure return request'}</button><p class="note-sm">The employee may return a provider letter or another supported document. No blank form or signature is required by this screen.</p>${inv.error?`<div class="banner err">${esc(inv.error)}</div>`:""}${inv.status?`<div class="banner ok">${esc(inv.status)}</div>`:""}
+    ${medicalPanel.returnRequests.length?`<div class="medical-request-list">${medicalPanel.returnRequests.map(r=>`<div class="task"><span><b>${esc(r.recipientMasked||"Recipient")}</b><span class="muted" style="font-size:11px"> · ${esc(r.status||"")} · ${r.dueAt?'due '+fmt(r.dueAt):'due date sets when sent'} · expires ${r.expiresAt?fmt(r.expiresAt):'—'}</span></span><button class="btn sm ghost" onclick="resendMedicalReturnRequest('${caseId}','${esc(r.id)}')">Resend</button></div>`).join("")}</div>`:""}`;
+}
+function medicalOperationsHtml(caseId){return `<div class="divider"></div><div class="medical-section-head"><b>Access and retention review</b></div><p class="note-sm">Activity comes from the restricted service. Retention review is a dry run; queueing records a review request and does not delete files.</p><div class="file-actions"><button class="btn sm ghost" onclick="loadMedicalAudit('${caseId}')">Load recent activity</button><button class="btn sm ghost" onclick="previewMedicalRetention('${caseId}')">Preview retention candidates</button></div>${medicalPanel.audit.length?`<ul class="timeline medical-audit">${medicalPanel.audit.map(e=>`<li><div class="t">${e.at?fmt(e.at):''} · ${esc(e.action||'activity')} · ${esc(e.outcome||'')}</div><div class="e">${esc(e.actorKind||'')}</div></li>`).join("")}</ul>`:""}${medicalPanel.retention.length?`<div class="medical-retention"><p><b>Dry-run candidates</b></p>${medicalPanel.retention.map(c=>`<label class="check-line"><input type="checkbox" data-medical-retention-id="${esc(c.id)}"> ${esc(c.id)} · eligible ${c.eligibleAt?fmt(c.eligibleAt):'—'}</label>`).join("")}<button class="btn sm ghost" onclick="enqueueMedicalRetention('${caseId}')">Queue selected for review</button></div>`:""}`;}
+function hardenMedicalFileInputs(root=document){root.querySelectorAll?.("#medical-files,#medical-return-files").forEach(input=>input.setAttribute("accept",".pdf,.png,.jpg,.jpeg,.docx"));}
+function paintMedicalPanel(){const el=$("medical-panel");if(el&&selected===medicalPanel.caseId){el.innerHTML=medicalPanelShellHtml(medicalPanel.caseId);hardenMedicalFileInputs(el);}}
+async function loadMedicalPanel(caseId){
+  if(!session||selected!==caseId)return;
+  if(medicalPanel.caseId!==caseId)medicalPanel=blankMedicalPanel(caseId);
+  medicalPanel.status="loading";medicalPanel.error="";paintMedicalPanel();
+  const epoch=sessionEpoch,userId=session.user.id,generation=medicalPanel.generation;
+  const cap=await medicalAction({action:"capabilities",caseId});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(cap.error){medicalPanel.status="error";medicalPanel.error=cap.error;paintMedicalPanel();return;}
+  medicalPanel.capabilities=cap.data;const listed=await medicalAction({action:"list",caseId});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(listed.error){medicalPanel.status="error";medicalPanel.error=listed.error;paintMedicalPanel();return;}
+  medicalPanel.documents=listed.data?.documents||[];medicalPanel.returnRequests=listed.data?.returnRequests||[];medicalPanel.status="ready";medicalPanel.error="";paintMedicalPanel();
+}
+async function startMedicalMfa(caseId){
+  if(selected!==caseId||medicalPanel.error?.code!=="MFA_REQUIRED")return;
+  const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;mfaBusy(true);
+  const factors=await sb.auth.mfa.listFactors();if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(factors.error){mfaBusy(false,factors.error.message);return;}
+  const factor=(factors.data?.totp||[]).find(f=>f.status==="verified");
+  if(factor){medicalPanel.mfa={mode:"challenge",factorId:factor.id,qr:"",secret:"",error:"",busy:false};paintMedicalPanel();return;}
+  const enrolled=await sb.auth.mfa.enroll({factorType:"totp",friendlyName:"People Support medical documents"});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(enrolled.error){mfaBusy(false,enrolled.error.message);return;}
+  const qr=enrolled.data?.totp?.qr_code||"",secret=enrolled.data?.totp?.secret||"";
+  medicalPanel.mfa={mode:"enroll",factorId:enrolled.data?.id||"",qr,secret,error:(!qr&&!secret)?"Authenticator setup details were unavailable.":"",busy:false};paintMedicalPanel();
+}
+function mfaBusy(busy,error=""){medicalPanel.mfa.busy=busy;medicalPanel.mfa.error=error;paintMedicalPanel();}
+async function verifyMedicalMfa(caseId){
+  const code=($("medical-mfa-code")?.value||"").trim();if(!/^\d{6}$/.test(code)){mfaBusy(false,"Enter the six-digit code from your authenticator app.");return;}
+  const factorId=medicalPanel.mfa.factorId;if(!factorId)return;
+  const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;mfaBusy(true);
+  const verified=await sb.auth.mfa.challengeAndVerify({factorId,code});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(verified.error){mfaBusy(false,"That authenticator code did not work. Try the current code.");return;}
+  medicalPanel.mfa={mode:"",factorId:"",qr:"",secret:"",error:"",busy:false};medicalPanel.status="idle";await loadMedicalPanel(caseId);
+}
+function medicalFileInfo(file){const ext=String(file?.name||"").split(".").pop().toLowerCase(),type=String(file?.type||"").toLowerCase(),allowed=MEDICAL_FILE_RULES.mimeByExtension[ext]||[];return {ext,type:type||allowed[0]||"",valid:!!allowed.length&&(!type||allowed.includes(type))&&file.size>0&&file.size<=MEDICAL_FILE_RULES.maxBytes};}
+function setMedicalFiles(files){medicalPanel.files=Array.from(files||[]);medicalPanel.error="";}
+async function uploadMedicalFiles(caseId){
+  const files=[...medicalPanel.files];if(!files.length){medicalPanel.status="upload-error";medicalPanel.error={message:"Choose at least one PDF, image, Word document."};paintMedicalPanel();return;}
+  const invalid=files.find(f=>!medicalFileInfo(f).valid);if(invalid){medicalPanel.status="upload-error";medicalPanel.error={message:`${invalid.name} is empty, too large, or has an unsupported file type.`};paintMedicalPanel();return;}
+  const kind=$("medical-kind")?.value||"other",label=($("medical-label")?.value||"").trim();const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;medicalPanel.busy=true;paintMedicalPanel();
+  try{for(const file of files){const info=medicalFileInfo(file),requestId=crypto.randomUUID();const prepared=await medicalAction({action:"prepare_upload",caseId,requestId,file:{name:file.name,type:info.type,size:file.size},kind,...(label?{label}:{} )});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(prepared.error)throw prepared.error;const upload=prepared.data?.file;if(!upload?.bucket||!upload?.uploadPath||!upload?.token)throw new Error("The private upload authorization was unavailable.");const uploaded=await sb.storage.from(upload.bucket).uploadToSignedUrl(upload.uploadPath,upload.token,file,{contentType:info.type});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(uploaded.error)throw uploaded.error;const committed=await medicalAction({action:"commit_upload",caseId,requestId,uploadId:prepared.data.uploadId});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(committed.error)throw committed.error;}medicalPanel.files=[];medicalPanel.busy=false;medicalPanel.status="idle";await loadMedicalPanel(caseId);}catch(error){if(medicalCurrent(caseId,generation,epoch,userId)){medicalPanel.busy=false;medicalPanel.status="upload-error";medicalPanel.error={message:error?.message||"Upload failed. Retry from the original file."};paintMedicalPanel();}}
+}
+function findMedicalDocument(id){return medicalPanel.documents.find(d=>d.id===id);}
+async function authorizeMedicalDocument(caseId,documentId,disposition){const result=await medicalAction({action:"download",caseId,documentId,disposition});return {url:result.data?.url,error:result.error,note:"Restricted preview access expires after one minute."};}
+async function previewMedicalDocument(caseId,documentId,restoreId){const source=medicalPanel,generation=source.generation,d=findMedicalDocument(documentId);if(!d)return;await openAttachmentPreview({name:d.label||"Medical document",type:d.mimeType||"",kindOverride:medicalPreviewKind(d),restoreId,isCurrent:()=>selected===caseId&&medicalPanel===source&&medicalPanel.generation===generation&&!!findMedicalDocument(documentId),authorize:()=>authorizeMedicalDocument(caseId,documentId,"inline"),download:()=>downloadMedicalDocument(caseId,documentId)});}
+async function downloadMedicalDocument(caseId,documentId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await authorizeMedicalDocument(caseId,documentId,"attachment");if(!medicalCurrent(caseId,generation,epoch,userId)||!findMedicalDocument(documentId))return;if(!result.url){alert("Could not authorize this restricted download: "+(result.error?.message||"unknown error"));return;}const a=document.createElement("a");a.href=result.url;a.target="_blank";a.rel="noopener noreferrer";a.referrerPolicy="no-referrer";document.body.appendChild(a);a.click();a.remove();}
+function setMedicalInviteField(field,value){if(!["email","kind","dueDays","dueAt","message"].includes(field))return;medicalPanel.invite[field]=value;if(field==="kind"&&value==="fmla"&&Number(medicalPanel.invite.dueDays)<15)medicalPanel.invite.dueDays="15";medicalPanel.invite.error="";medicalPanel.invite.status="";medicalPanel.invite.idempotencyKey="";if(field==="kind")paintMedicalPanel();}
+async function createMedicalReturnRequest(caseId){const inv=medicalPanel.invite,email=inv.email.trim().toLowerCase(),days=Number(inv.dueDays);if(!/^\S+@\S+\.\S+$/.test(email)){inv.error="Enter the recipient's email address.";paintMedicalPanel();return;}if(inv.kind==="fmla"&&!inv.dueAt&&(!Number.isFinite(days)||days<15)){inv.error="Medical leave requests need a requested-by date or at least 15 days.";paintMedicalPanel();return;}inv.busy=true;inv.error="";inv.status="";inv.idempotencyKey||=crypto.randomUUID();paintMedicalPanel();const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;const result=await medicalAction({action:"create_return_request",caseId,recipientEmail:email,requestKind:inv.kind,...(inv.dueAt?{dueAt:new Date(inv.dueAt+"T12:00:00Z").toISOString()}:{dueDays:days||14}),...(inv.message.trim()?{message:inv.message.trim()}:{}),idempotencyKey:inv.idempotencyKey});if(!medicalCurrent(caseId,generation,epoch,userId))return;inv.busy=false;if(result.error){inv.error=result.error.message||"The request could not be created.";paintMedicalPanel();return;}inv.status="Secure request queued. Its requested-by date will be set when delivery succeeds.";inv.idempotencyKey="";medicalPanel.returnRequests=[result.data?.request,...medicalPanel.returnRequests].filter(Boolean);paintMedicalPanel();}
+async function resendMedicalReturnRequest(caseId,returnRequestId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"resend_return_request",caseId,returnRequestId,idempotencyKey:crypto.randomUUID()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){medicalPanel.invite.error=result.error.message||"The request could not be resent.";}else medicalPanel.invite.status="Resend queued. The original due date is preserved.";paintMedicalPanel();}
+async function toggleMedicalLegalHold(caseId,documentId,enabled){const reason=prompt(enabled?"Reason for placing this document on hold:":"Reason for releasing this document hold:","");if(reason===null||!reason.trim())return;const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"set_legal_hold",caseId,documentId,enabled,reason:reason.trim()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"The hold could not be updated.");return;}const index=medicalPanel.documents.findIndex(d=>d.id===documentId);if(index>=0)medicalPanel.documents[index]={...medicalPanel.documents[index],...(result.data||{}),legalHold:enabled};paintMedicalPanel();}
+async function loadMedicalAudit(caseId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"audit_list",caseId,limit:50});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"Activity could not be loaded.");return;}medicalPanel.audit=result.data?.events||[];paintMedicalPanel();}
+async function previewMedicalRetention(caseId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"retention_preview",caseId,limit:100});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"Retention preview could not be loaded.");return;}medicalPanel.retention=result.data?.candidates||[];paintMedicalPanel();}
+async function enqueueMedicalRetention(caseId){const ids=[...document.querySelectorAll("[data-medical-retention-id]:checked")].map(el=>el.dataset.medicalRetentionId).filter(Boolean);if(!ids.length){alert("Select at least one dry-run candidate.");return;}const reason=prompt("Reason for queueing these records for retention review:","");if(reason===null||!reason.trim())return;const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"retention_enqueue",caseId,documentIds:ids,reason:reason.trim()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"The retention review could not be queued.");return;}alert(`${result.data?.queued?.length||0} document(s) queued for review. No files were deleted.`);await previewMedicalRetention(caseId);}
+
 function evidenceHtml(caseId){
   if(evidence.err) return `<span class="muted">${esc(evidence.err)}</span>`;
   if(!evidence.list.length) return '<span class="muted">No evidence uploaded.</span>';
-  return evidence.list.map(f=>`<div class="task"><span>${esc(f.name.replace(/^\d+_/,''))}</span>
+  return evidence.list.map((f,index)=>{const display=f.name.replace(/^\d+_/,''),kind=attachmentKind(display,f.metadata?.mimetype||"");return `<div class="task"><span>${esc(display)}</span>
       <span class="due">${f.created_at?fmt(f.created_at):''}</span>
-      <button class="btn sm ghost" data-n="${esc(f.name)}" onclick="evDownload('${caseId}',this.dataset.n)">Download</button></div>`).join("")
+      <span class="file-actions">${kind!=="download"?`<button id="evidence-preview-${index}" class="btn sm sec" data-n="${esc(f.name)}" data-d="${esc(display)}" data-t="${esc(f.metadata?.mimetype||'')}" onclick="evPreview('${caseId}',this.dataset.n,this.dataset.d,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-n="${esc(f.name)}" onclick="evDownload('${caseId}',this.dataset.n)">Download</button></span></div>`;}).join("")
     + `<p class="note-sm" style="margin-top:8px">Files are locked once submitted — you can download them but not edit or replace them (audit integrity). Use the Interviews section for working notes and questions.</p>`;
 }
 // ---- email-intake files (case_files, migration 019) -------------------------
@@ -2502,14 +2817,38 @@ const fmtBytes = n => (n==null || isNaN(n)) ? "—"
 async function caseFileDownload(path, name){
   // service-role wrote these under case_<uuid>/… — handlers read via the
   // evidence_email_select storage policy (019).
+  const caseId=selected,epoch=sessionEpoch,userId=session?.user?.id,source=caseExport;
+  const linked=source?.c?.id===caseId&&(source.files||[]).some(file=>file.storage_path===path&&file.file_name===name);
+  if(!caseId||!linked||!caseFilePathAllowed({storage_path:path,source:"email"},caseId)){alert("This file is not linked to the open case.");return;}
   const { data, error } = await sb.storage.from("evidence").download(path);
+  if(epoch!==sessionEpoch||session?.user?.id!==userId||selected!==caseId||caseExport!==source||!(source.files||[]).some(file=>file.storage_path===path&&file.file_name===name))return;
   if(error || !data){ alert("Could not download this file: " + (error?.message||"unknown error")); return; }
   downloadBlob(data, name || path.split("/").pop());
 }
+async function caseFilePreview(path,name,type,restoreId){
+  const caseId=selected;
+  const linked=caseExport?.c?.id===caseId&&(caseExport.files||[]).some(file=>file.storage_path===path&&file.file_name===name);
+  if(!caseId || !linked || !caseFilePathAllowed({storage_path:path,source:"email"},caseId)){alert("This file is not linked to the open case.");return;}
+  await openAttachmentPreview({name,type,restoreId,
+    isCurrent:()=>selected===caseId&&caseExport?.c?.id===caseId&&(caseExport.files||[]).some(file=>file.storage_path===path&&file.file_name===name),
+    authorize:async()=>{const {data,error}=await sb.storage.from("evidence").createSignedUrl(path,120);return {url:data?.signedUrl,error,note:"Private preview access expires after two minutes."};},
+    download:()=>caseFileDownload(path,name)});
+}
 async function evDownload(caseId, fname){
+  if(selected!==caseId||!fname||/[\\/]/.test(fname)||!evidence.list.some(file=>file.name===fname)){alert("This evidence file is not linked to the open case.");return;}
+  const epoch=sessionEpoch,userId=session?.user?.id,source=evidence;
   const { data, error } = await sb.storage.from("evidence").createSignedUrl(`${caseId}/${fname}`, 120);
+  if(epoch!==sessionEpoch||session?.user?.id!==userId||selected!==caseId||evidence!==source||!source.list.some(file=>file.name===fname))return;
   if(error || !data?.signedUrl){ alert("Could not create a download link: " + (error?.message||"unknown error")); return; }
   window.open(data.signedUrl, "_blank");
+}
+async function evPreview(caseId,fname,displayName,type,restoreId){
+  if(selected!==caseId || !fname || /[\\/]/.test(fname) || !evidence.list.some(file=>file.name===fname)){alert("This evidence file path is invalid.");return;}
+  const path=`${caseId}/${fname}`;
+  await openAttachmentPreview({name:displayName||fname,type,restoreId,
+    isCurrent:()=>selected===caseId&&evidence.list.some(file=>file.name===fname),
+    authorize:async()=>{const {data,error}=await sb.storage.from("evidence").createSignedUrl(path,120);return {url:data?.signedUrl,error,note:"Private preview access expires after two minutes."};},
+    download:()=>evDownload(caseId,fname)});
 }
 async function uploadCaseEvidence(caseId){
   const files = Array.from($("ev-file")?.files||[]);
@@ -2565,26 +2904,86 @@ async function removePolicyChip(caseId, p){
   if(error){ alert(errText(error)); return; }
   render();
 }
-// Interviews: explicit Save and notes-blur autosave both write straight to the DB.
-// Neither triggers a re-render, so typing/scroll position is never lost mid-interview.
+const INTERVIEW_FORMATS = ["Virtual", "Phone", "In person"];
+function browserTimeZone(){ try{return Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";}catch{return "UTC";} }
+function timezoneNames(){ try{return [...new Set(["UTC",...(Intl.supportedValuesOf?.("timeZone")||[]),browserTimeZone()])].sort();}catch{return ["UTC",browserTimeZone()];} }
+function timezoneSelectHtml(id,value){ return `<select id="${id}"><option value="">Not recorded</option>${timezoneNames().map(zone=>`<option value="${esc(zone)}" ${zone===value?'selected':''}>${esc(zone)}</option>`).join("")}</select>`; }
+function interviewPairs(value){
+  if(typeof value==="string") try{value=JSON.parse(value);}catch{return [];}
+  return Array.isArray(value)?value.filter(pair=>pair&&typeof pair==="object").map(pair=>({id:String(pair.id||crypto.randomUUID()),question:String(pair.question||""),response:String(pair.response||"")})):[];
+}
+function interviewDraft(iv){
+  if(!interviewDrafts.has(iv.id)) interviewDrafts.set(iv.id,{
+    id:iv.id, interviewee:iv.interviewee||"", role:iv.role_in_case||"", date:iv.interview_date||"",
+    time:iv.interview_local_time||"", timezone:iv.interview_timezone||"", format:iv.interview_format||"",
+    duration:iv.duration_minutes==null?"":String(iv.duration_minutes), title:iv.interviewee_title||"",
+    location:iv.interviewee_location||"", interviewer:iv.interviewer||"", status:iv.status||"Scheduled",
+    notes:iv.notes||"", followUp:iv.follow_up||"", opening:iv.opening_response||"",
+    closing:iv.closing_response||"", pairs:interviewPairs(iv.question_responses)
+  });
+  return interviewDrafts.get(iv.id);
+}
+function interviewEditorHtml(caseId,iv){
+  const d=interviewDraft(iv);
+  return `<div class="iv-row" id="iv-${iv.id}">
+    <div class="iv-grid">
+      <span><span class="mini-l">Person interviewed</span><input id="iv-name-${iv.id}" type="text" value="${esc(d.interviewee)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Role in case</span><select id="iv-role-${iv.id}" onchange="syncInterviewDraft('${iv.id}')">${[...new Set([...PARTY_ROLES,...(d.role?[d.role]:[]),"Other"])].map(r=>`<option value="${esc(r)}" ${d.role===r?'selected':''}>${esc(rlabel(r))}</option>`).join("")}</select></span>
+      <span><span class="mini-l">Date</span><input id="iv-date-${iv.id}" type="date" value="${esc(d.date)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Local time</span><input id="iv-time-${iv.id}" type="time" step="60" value="${esc(String(d.time).slice(0,5))}" oninput="syncInterviewDraft('${iv.id}')">${d.time?'':'<span class="note-sm">Time not recorded</span>'}</span>
+      <span><span class="mini-l">IANA time zone</span>${timezoneSelectHtml(`iv-zone-${iv.id}`,d.time?d.timezone:"").replace('<select ',`<select onchange="syncInterviewDraft('${iv.id}')" `)}</span>
+      <span><span class="mini-l">Format</span><select id="iv-format-${iv.id}" onchange="syncInterviewDraft('${iv.id}')"><option value="">Not recorded</option>${INTERVIEW_FORMATS.map(v=>`<option ${d.format===v?'selected':''}>${v}</option>`).join("")}</select></span>
+      <span><span class="mini-l">Duration (minutes)</span><input id="iv-duration-${iv.id}" type="number" min="1" max="1440" value="${esc(d.duration)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Interviewee title</span><input id="iv-title-${iv.id}" type="text" value="${esc(d.title)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Interviewee location</span><input id="iv-location-${iv.id}" type="text" value="${esc(d.location)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Interviewer</span><input id="iv-by-${iv.id}" type="text" value="${esc(d.interviewer)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+      <span><span class="mini-l">Status</span><select id="iv-status-${iv.id}" onchange="syncInterviewDraft('${iv.id}')">${INTERVIEW_STATUS.map(s=>`<option ${d.status===s?'selected':''}>${s}</option>`).join("")}</select></span>
+      <span><span class="mini-l">Follow-up needed</span><input id="iv-fu-${iv.id}" type="text" value="${esc(d.followUp)}" oninput="syncInterviewDraft('${iv.id}')"></span>
+    </div>
+    <label class="mini-l" for="iv-opening-${iv.id}" style="margin-top:10px">${esc(ER_STATEMENT_GUIDE.openingQuestion)}</label><span class="mini-l">${esc(ER_STATEMENT_GUIDE.responseLabel)}</span>
+    <textarea id="iv-opening-${iv.id}" style="min-height:70px" oninput="syncInterviewDraft('${iv.id}')">${esc(d.opening)}</textarea>
+    <div class="interview-pairs" aria-label="Case-specific questions">
+      ${d.pairs.map((pair,index)=>`<div class="interview-pair" data-pair-id="${esc(pair.id)}"><label class="mini-l" for="iv-q-${iv.id}-${pair.id}">Question ${index+1}</label><textarea id="iv-q-${iv.id}-${pair.id}" oninput="syncInterviewDraft('${iv.id}')" placeholder="Question">${esc(pair.question)}</textarea><label class="mini-l" for="iv-a-${iv.id}-${pair.id}">${esc(ER_STATEMENT_GUIDE.responseLabel)}</label><textarea id="iv-a-${iv.id}-${pair.id}" oninput="syncInterviewDraft('${iv.id}')" placeholder="${esc(ER_STATEMENT_GUIDE.responseLabel.trim())}">${esc(pair.response)}</textarea><div class="file-actions"><button class="btn sm ghost" onclick="moveInterviewPair('${caseId}','${iv.id}',${index},-1)" ${index===0?'disabled':''} aria-label="Move question ${index+1} up">↑</button><button class="btn sm ghost" onclick="moveInterviewPair('${caseId}','${iv.id}',${index},1)" ${index===d.pairs.length-1?'disabled':''} aria-label="Move question ${index+1} down">↓</button><button class="btn sm ghost" onclick="removeInterviewPair('${caseId}','${iv.id}',${index})">Remove</button></div></div>`).join("")}
+      <button class="btn sm ghost" onclick="addInterviewPair('${caseId}','${iv.id}')" ${d.pairs.length>=50?'disabled':''}>Add question and response</button>
+    </div>
+    <label class="mini-l" for="iv-closing-${iv.id}" style="margin-top:10px">${esc(ER_STATEMENT_GUIDE.closingQuestion)}</label><span class="mini-l">${esc(ER_STATEMENT_GUIDE.responseLabel)}</span>
+    <textarea id="iv-closing-${iv.id}" style="min-height:70px" oninput="syncInterviewDraft('${iv.id}')">${esc(d.closing)}</textarea>
+    <label class="mini-l" for="iv-notes-${iv.id}" style="margin-top:10px">Working notes (not copied into statement responses)</label>
+    <textarea id="iv-notes-${iv.id}" style="min-height:90px" oninput="syncInterviewDraft('${iv.id}')" onblur="saveInterviewUI('${caseId}','${iv.id}',true)">${esc(d.notes)}</textarea>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="saveInterviewUI('${caseId}','${iv.id}')">Save</button><button class="btn sm ghost" onclick="downloadFilledStatement('${caseId}','${iv.id}')">Download filled statement</button><span class="muted" id="iv-saved-${iv.id}" style="font-size:12px;align-self:center"></span><button class="btn sm ghost" style="margin-left:auto" onclick="deleteInterviewUI('${iv.id}')">Remove</button></div>
+  </div>`;
+}
+function syncInterviewDraft(id){
+  const d=interviewDrafts.get(id); if(!d)return;
+  const read=k=>$(`iv-${k}-${id}`)?.value;
+  for(const [key,field] of Object.entries({interviewee:"name",role:"role",date:"date",time:"time",timezone:"zone",format:"format",duration:"duration",title:"title",location:"location",interviewer:"by",status:"status",followUp:"fu",opening:"opening",closing:"closing",notes:"notes"})) if(read(field)!=null)d[key]=read(field);
+  d.pairs.forEach(pair=>{const q=$(`iv-q-${id}-${pair.id}`),a=$(`iv-a-${id}-${pair.id}`);if(q)pair.question=q.value;if(a)pair.response=a.value;});
+}
+function rerenderInterview(caseId,id){ syncInterviewDraft(id); const row=$(`iv-${id}`),iv=caseExport?.interviews?.find(item=>item.id===id); if(row&&iv)row.outerHTML=interviewEditorHtml(caseId,iv); }
+function addInterviewPair(caseId,id){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d||d.pairs.length>=50)return;d.pairs.push({id:crypto.randomUUID(),question:"",response:""});rerenderInterview(caseId,id);}
+function removeInterviewPair(caseId,id,index){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d)return;d.pairs.splice(index,1);rerenderInterview(caseId,id);}
+function moveInterviewPair(caseId,id,index,delta){syncInterviewDraft(id);const d=interviewDrafts.get(id),to=index+delta;if(!d||to<0||to>=d.pairs.length)return;[d.pairs[index],d.pairs[to]]=[d.pairs[to],d.pairs[index]];rerenderInterview(caseId,id);}
+function interviewPayload(caseId,id){
+  syncInterviewDraft(id);const d=interviewDrafts.get(id); if(!d)return null;
+  const duration=d.duration===""?null:Number(d.duration);
+  return {p_id:id,p_case_id:caseId,p_interviewee:d.interviewee,p_role:d.role||null,p_date:d.date||null,p_local_time:d.time||null,p_timezone:d.time?(d.timezone||null):null,p_format:d.format||null,p_duration_minutes:duration,p_interviewee_title:d.title||null,p_interviewee_location:d.location||null,p_interviewer:d.interviewer||null,p_status:d.status,p_notes:d.notes||null,p_follow_up:d.followUp||null,p_question_responses:d.pairs.map(pair=>({...pair})),p_opening_response:d.opening||null,p_closing_response:d.closing||null};
+}
+// Explicit Save and notes-blur autosave share one per-interview queue. The DOM is
+// never repainted after a save, so a failed or older request cannot erase typing.
 function saveInterviewUI(caseId, id, silent){
-  const g = k => $(`iv-${k}-${id}`)?.value ?? null;
-  const payload = {
-    p_id:id, p_case_id:caseId,
-    p_interviewee:g("name"), p_role:g("role"), p_date:g("date") || null,
-    p_interviewer:g("by"), p_status:g("status"),
-    p_notes:$(`iv-notes-${id}`)?.value ?? null, p_follow_up:g("fu"),
-  };
+  const payload=interviewPayload(caseId,id); if(!payload)return Promise.resolve(false);
   const key = `${caseId}:${id}`;
   const previous = interviewSavePromises.get(key);
   const run = (async()=>{
     if(previous) await previous;
     let error;
-    try { ({error} = await sb.rpc("save_interview", payload)); }
+    try { ({error} = await sb.rpc("save_interview_v2", payload)); }
     catch(caught) { error = caught; }
     const s = $(`iv-saved-${id}`);
     if(error){ if(s) s.textContent = "Save failed"; if(!silent) alert(errText(error)); return false; }
     if(s) s.textContent = "Saved " + new Date().toLocaleTimeString();
+    const row=caseExport?.interviews?.find(item=>item.id===id);
+    if(row)Object.assign(row,{interviewee:payload.p_interviewee,role_in_case:payload.p_role,interview_date:payload.p_date,interview_local_time:payload.p_local_time,interview_timezone:payload.p_timezone,interview_format:payload.p_format,duration_minutes:payload.p_duration_minutes,interviewee_title:payload.p_interviewee_title,interviewee_location:payload.p_interviewee_location,interviewer:payload.p_interviewer,status:payload.p_status,notes:payload.p_notes,follow_up:payload.p_follow_up,question_responses:payload.p_question_responses,opening_response:payload.p_opening_response,closing_response:payload.p_closing_response});
     return true;
   })();
   let tracked;
@@ -2595,11 +2994,14 @@ function saveInterviewUI(caseId, id, silent){
 async function addInterviewUI(caseId){
   const name = ($("ni-name")?.value || "").trim();
   if(!name){ alert("Enter the name of the person interviewed."); return; }
-  const { error } = await sb.rpc("save_interview", {
+  const time=$("ni-time")?.value||null;
+  const { error } = await sb.rpc("save_interview_v2", {
     p_id: null, p_case_id: caseId, p_interviewee: name,
     p_role: $("ni-role")?.value ?? null, p_date: $("ni-date")?.value || null,
-    p_interviewer: $("ni-by")?.value ?? null, p_status: "Scheduled",
-    p_notes: null, p_follow_up: null });
+    p_local_time:time,p_timezone:time?($("ni-zone")?.value||null):null,p_format:$("ni-format")?.value||null,
+    p_duration_minutes:$("ni-duration")?.value?Number($("ni-duration").value):null,p_interviewee_title:$("ni-title")?.value||null,
+    p_interviewee_location:$("ni-location")?.value||null,p_interviewer:$("ni-by")?.value||null,p_status:"Scheduled",
+    p_notes:null,p_follow_up:null,p_question_responses:[],p_opening_response:null,p_closing_response:null });
   if(error){ alert(errText(error)); return; }
   render();
 }
@@ -2607,6 +3009,7 @@ async function deleteInterviewUI(id){
   if(!confirm("Remove this interview (including its notes)?")) return;
   const { error } = await sb.rpc("delete_interview", { p_id: id });
   if(error){ alert(errText(error)); return; }
+  interviewDrafts.delete(id);
   render();
 }
 async function saveActionUI(caseId, id){
@@ -2681,25 +3084,38 @@ async function doReassign(id){
 // guide used when discussing a report on a call. Shown next to HR notes so the
 // handler knows what to capture.
 function interviewGuideHtml(){
-  return `<div class="guide">
-    <div class="g-sec"><span class="mini-l">Log these details in your notes</span>
-      Date &amp; time of the call · who you interviewed (name, title, store) · interview duration · remote or in person · the implicated person.</div>
-    <div class="g-sec"><span class="mini-l">Introduction — say to the interviewee</span>
-      <ul><li>Brief intro: your name, title, and role in the investigation.</li>
-      <li>Reason for the conversation — if they're implicated: "We're looking into a concern that was reported. We're not saying what was reported is true, but we need to ask for your account."</li></ul></div>
-    <div class="g-sec"><span class="mini-l">Explain the HR approach</span>
-      <ul><li>We don't assume the report is true — it's the starting point for the investigation.</li>
-      <li>Recommendations are based only on what we can substantiate (factual / provable).</li>
-      <li>Unable to substantiate or inconclusive ≠ we don't believe it could have happened.</li>
-      <li>Corrective actions are constrained to what we can prove or deduce.</li></ul></div>
-    <div class="g-sec"><span class="mini-l">Confidentiality — say to the interviewee</span>
-      No one who doesn't need access will see this statement. Key Support Center HR people or legal counsel may reference it if needed; beyond that we do our best to keep it confidential.</div>
-    <div class="g-sec"><span class="mini-l">Questions — record each response below</span>
-      <ul><li><b>Open with:</b> "How would you describe the overall working environment in your store/area?"</li>
-      <li><b>Then 5–6 specific questions about this case</b> — prepare them from the description and evidence before the call.</li>
-      <li><b>Always close with:</b> "Is there anything else that you feel is important for me to know, or that I should have asked you?"</li></ul></div>
+  const guide=ER_STATEMENT_GUIDE;
+  return `<div class="guide" id="er-statement-guide">
+    <div class="g-sec"><span class="mini-l">Statement details</span><ul>${guide.metadataLabels.map(label=>`<li>${esc(label)}</li>`).join("")}</ul></div>
+    <div class="g-sec"><span class="mini-l">Interview script</span>${guide.script.map(line=>`<p>${esc(line)}</p>`).join("")}</div>
+    <div class="g-sec"><span class="mini-l">Opening question</span><p>${esc(guide.openingQuestion)}</p></div>
+    <div class="g-sec"><span class="mini-l">Source question placeholders</span><ul>${guide.variableQuestionPlaceholders.map(q=>`<li>${esc(q)}</li>`).join("")}</ul><p>${esc(guide.responseLabel)}</p></div>
+    <div class="g-sec"><span class="mini-l">Closing question</span><p>${esc(guide.closingQuestion)}</p></div>
   </div>`;
 }
+function implicatedPeopleForStatement(snapshot=caseExport){
+  return (snapshot?.parties||[]).filter(p=>p.role_in_case==="subject").map(p=>p.party_type==="customer"||(!p.subject_id&&p.display_name)?(p.display_name||"Customer"):nameOf(p.subject_id)).filter(Boolean).join("; ");
+}
+function statementModel(iv,snapshot=caseExport){
+  const pairs=interviewPairs(iv.question_responses);
+  return {metadata:{interviewer:iv.interviewer||"",date:iv.interview_date||"",time:iv.interview_local_time?`${String(iv.interview_local_time).slice(0,5)} ${iv.interview_timezone||""}`.trim():"",interviewee:iv.interviewee||"",intervieweeTitle:iv.interviewee_title||"",intervieweeLocation:iv.interviewee_location||"",duration:iv.duration_minutes?`${iv.duration_minutes} minutes`:"",format:iv.interview_format||"",caseReference:snapshot?.c?.ref||"",implicatedPerson:implicatedPeopleForStatement(snapshot)},openingResponse:iv.opening_response||"",pairs,closingResponse:iv.closing_response||""};
+}
+async function ensureStatementTemplate(){
+  if(!statementTemplatePromise){const epoch=sessionEpoch,userId=session?.user?.id;statementTemplatePromise=(async()=>{const current=()=>epoch===sessionEpoch&&session?.user?.id===userId;if(!current())throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});const {data,error}=await sb.storage.from(STATEMENT_TEMPLATE_BUCKET).download(STATEMENT_TEMPLATE_OBJECT);if(!current()){clearStatementTemplate();throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});}if(error)throw error;await configureStatementTemplate(data);if(!current()){clearStatementTemplate();throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});}})().catch(error=>{statementTemplatePromise=null;throw error;});}
+  return statementTemplatePromise;
+}
+async function downloadBlankStatement(){try{await ensureStatementTemplate();downloadBlob(buildBlankBlob(),STATEMENT_TEMPLATE_FILENAME);}catch(error){if(!error.cancelled)alert(`The approved statement could not be downloaded. ${errText(error)}`);}}
+async function downloadFilledStatement(caseId,id){
+  const button=document.activeElement; if(button instanceof HTMLButtonElement)button.disabled=true;
+  try{
+    if(!await saveInterviewUI(caseId,id,false))return;
+    await ensureStatementTemplate();
+    const iv=caseExport?.interviews?.find(item=>item.id===id);if(!iv)return;
+    const leaf=String(iv.interviewee||"interview").replace(/[^A-Za-z0-9 _.-]/g,"_").trim()||"interview";
+    downloadBlob(buildFilledBlob(statementModel(iv)),`${leaf} - filled ER statement.docx`);
+  }catch(error){if(!error.cancelled)alert(`The filled statement could not be downloaded. ${errText(error)}`);}finally{if(button instanceof HTMLButtonElement&&button.isConnected)button.disabled=false;}
+}
+
 async function addNote(id){
   const v = $("hr-note")?.value.trim(); if(!v) return;
   const { error } = await sb.rpc("add_case_note",{ p_case_id:id, p_body:v });
@@ -2825,8 +3241,8 @@ function renderStatus(){
   </div>
   <div class="card">
     <b style="font-size:14px">Reports you submitted with your name</b>
-    ${myReportsLoading?'<p class="muted">Loading your reports…</p>':myReportsError?`<div class="banner err">${esc(myReportsError)} <button class="btn sm sec" onclick="retryMyReports()">Retry</button></div>`:myReports.length?`<table style="margin-top:10px"><thead><tr><th>Ref</th><th>Category</th><th>Status</th><th>Submitted</th></tr></thead>
-      <tbody>${myReports.map(c=>`<tr><td><span class="ref">${esc(c.ref)}</span></td><td>${esc(c.category)}</td><td>${pill(c.state)}</td><td>${fmt(c.created_at)}</td></tr>`).join("")}</tbody></table>`
+    ${myReportsLoading?'<p class="muted">Loading your reports…</p>':myReportsError?`<div class="banner err">${esc(myReportsError)} <button class="btn sm sec" onclick="retryMyReports()">Retry</button></div>`:myReports.length?`<table style="margin-top:10px"><thead><tr><th>Ref</th><th>Category</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+      <tbody>${myReports.map(c=>`<tr><td><span class="ref">${esc(c.ref)}</span></td><td>${esc(c.category)}</td><td>${pill(c.state)}</td><td>${fmt(c.created_at)}</td><td><button class="btn sm sec" data-ref="${esc(c.ref)}" onclick="openNamedReportMessages(this.dataset.ref)">Messages</button></td></tr>`).join("")}</tbody></table>`
       :'<p class="muted">None found for this email.</p>'}
   </div>`;
 }
@@ -2876,6 +3292,7 @@ async function retryEvidenceUploads(){
   }
 }
 async function doStatusCheck(){
+  closeAttachmentPreview(false);
   const code = $("cc")?.value.trim().toUpperCase(); if(!code) return;
   const epoch = sessionEpoch;
   const { data, error } = await sb.rpc("check_status",{ p_claim_code: code });
@@ -2883,7 +3300,13 @@ async function doStatusCheck(){
   statusResult = error
     ? {tried:code,found:false,error:"Status lookup is temporarily unavailable. Please try again."}
     : Object.assign({tried:code}, data);
+  if(!error&&statusResult.found) await loadMessageThread(null,code,null);
   render();
+}
+async function openNamedReportMessages(caseRef){
+  closeAttachmentPreview(false);if(!caseRef)return;statusResult={tried:"",found:true,ref:caseRef,state:"",handler:"",named:true};
+  await loadMessageThread(null,null,caseRef);render();
+  $("message-body")?.focus();
 }
 function renderStatusCard(s){
   return `<div class="divider"></div>
@@ -2891,8 +3314,7 @@ function renderStatusCard(s){
     <div class="kv"><span class="k">Status</span>${pill(s.state)}</div>
     <div class="kv"><span class="k">Handled by</span><span>${esc(s.handler||'—')}</span></div>
     <b style="font-size:13px;display:block;margin-top:14px">Messages with HR</b>
-    <div class="msgwrap" style="margin:10px 0">${(s.messages||[]).length?s.messages.map(m=>`<div class="msg ${m.sender==='handler'?'handler':m.sender==='email'?'email':'reporter'}"><div class="who">${m.sender==='handler'?'HR':m.sender==='email'?'Email':'You'}${m.sender==='reporter'&&m.via_email?' · via email':''}</div>${linkify(m.body)}</div>`).join(""):'<span class="muted">No messages yet.</span>'}</div>
-    <div style="display:flex;gap:8px"><input id="rmsg" type="text" placeholder="Reply to HR (still anonymous)…"><button class="btn sec" onclick="sendReporterReply()">Send</button></div>`;
+    ${messageThreadHtml(null,s.named?null:s.tried,false,s.named?s.ref:null)}`;
 }
 async function sendReporterReply(){
   const v=$("rmsg")?.value.trim(); if(!v)return;
@@ -2949,6 +3371,21 @@ function caseMessagesTxt(snapshot=caseExport){
     lines.push(`[${new Date(m.created_at).toLocaleString()}] ${who(m)}:`, m.body || "", "");
   }
   return lines.join("\r\n");
+}
+function interviewSummaryHtml(iv,kv,dash){
+  const pairs=interviewPairs(iv.question_responses);
+  const localTime=iv.interview_local_time?`${esc(String(iv.interview_local_time).slice(0,5))} ${esc(iv.interview_timezone||"")}`:"Time not recorded";
+  return `<article class="interview-summary"><table class="kv" style="margin-bottom:10px">
+    ${kv("Interviewee",dash(iv.interviewee)+(iv.role_in_case?` (${esc(rlabel(iv.role_in_case))})`:""))}
+    ${kv("Date",iv.interview_date?esc(fmtDateOnly(iv.interview_date)):"—")}${kv("Local time / IANA zone",localTime)}
+    ${kv("Format",dash(iv.interview_format))}${kv("Duration",iv.duration_minutes?`${esc(iv.duration_minutes)} minutes`:"—")}
+    ${kv("Interviewee title",dash(iv.interviewee_title))}${kv("Interviewee location",dash(iv.interviewee_location))}
+    ${kv("Interviewer / status",dash(iv.interviewer)+" · "+dash(iv.status))}${iv.follow_up?kv("Follow-up",esc(iv.follow_up)):""}
+  </table>
+  <h3>${esc(ER_STATEMENT_GUIDE.openingQuestion)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(iv.opening_response||"")}</div>
+  ${pairs.map((pair,index)=>`<h3>Question ${index+1}: ${esc(pair.question)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(pair.response)}</div>`).join("")}
+  <h3>${esc(ER_STATEMENT_GUIDE.closingQuestion)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(iv.closing_response||"")}</div>
+  ${iv.notes?`<h3>Working notes (separate from statement responses)</h3><div class="box" style="margin-bottom:16px">${esc(iv.notes)}</div>`:""}</article>`;
 }
 function caseSummaryHtml(snapshot=caseExport){
   const { c, parties, events, tasks, messages, notes, allegations, interviews, actions, attachments=[], handlerName } = snapshot;
@@ -3007,12 +3444,8 @@ ${isReq?"":sec("Corrective actions", actions.length
   ? `<table class="grid"><tr><th>Action</th><th>Responsible</th><th>Due</th><th>Completed</th><th>Notes</th></tr>${actions.map(a=>`<tr><td>${dash(a.action_type)}</td><td>${dash(a.responsible)}</td><td>${a.due_date?esc(fmtDateOnly(a.due_date)):"—"}</td><td>${a.completed_date?esc(fmtDateOnly(a.completed_date)):"—"}</td><td>${dash(a.notes)}</td></tr>`).join("")}</table>`
   : `<p class="muted">None recorded.</p>`)}
 ${isReq?"":sec("Interviews", interviews.length
-  ? interviews.map(iv=>`<table class="kv" style="margin-bottom:10px">
-      ${kv("Interviewee", dash(iv.interviewee)+(iv.role_in_case?` (${esc(rlabel(iv.role_in_case))})`:""))}
-      ${kv("Date / interviewer", (iv.interview_date?esc(fmtDateOnly(iv.interview_date)):"—")+" · "+dash(iv.interviewer)+" · "+dash(iv.status))}
-      ${iv.follow_up?kv("Follow-up", esc(iv.follow_up)):""}
-    </table>${iv.notes?`<div class="box" style="margin-bottom:16px">${esc(iv.notes)}</div>`:""}`).join("")
-  : `<p class="muted">None recorded.</p>`)}
+  ? interviews.map(iv=>interviewSummaryHtml(iv,kv,dash)).join("")
+  : `<p class="muted">None recorded.</p>`) }
 ${sec("Follow-up tasks", tasks.length
   ? `<table class="grid"><tr><th>Task</th><th>Status</th><th>Due</th></tr>${tasks.map(t=>`<tr><td>${dash(t.title)}</td><td>${dash(t.status)}</td><td>${t.due_at?esc(fmt(t.due_at)):"—"}</td></tr>`).join("")}</table>`
   : `<p class="muted">No tasks.</p>`)}
@@ -3119,13 +3552,12 @@ const caseFileInventorySignature = files => files.map(file=>[
 async function awaitPendingInterviewSaves(caseId, button){
   if(document.activeElement?.id?.startsWith("iv-")) document.activeElement.blur();
   await Promise.resolve();
-  const pending = [...interviewSavePromises.entries()]
-    .filter(([key])=>key.startsWith(`${caseId}:`)).map(([,promise])=>promise);
+  const pending = (caseExport?.interviews||[]).map(iv=>saveInterviewUI(caseId,iv.id,true));
   if(!pending.length) return;
   const status = $("case-export-status");
-  if(status?.isConnected) status.textContent = "Saving interview notes…";
+  if(status?.isConnected) status.textContent = "Saving interviews…";
   const results = await Promise.all(pending);
-  if(results.some(saved=>!saved)) throw new Error("Interview notes could not be saved, so the export was stopped. Save them and retry.");
+  if(results.some(saved=>!saved)) throw new Error("Interview details could not be saved, so the export was stopped. Save them and retry.");
 }
 function attachmentManifest(snapshot){
   const lines = [
@@ -3172,6 +3604,13 @@ async function exportCaseZip(){
     if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
     const fresh = await loadFreshCaseExportSnapshot(source, caseId);
     if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    const messageListResult=await messageAttachmentAction({action:"list",mode:"handler",caseId});
+    if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
+    if(messageListResult.error) throw new Error("A complete export cannot be created because message attachments could not be authorized.");
+    const messageAttachmentFiles=(messageListResult.data?.messages||[]).flatMap(message=>(message.attachments||[]).map(file=>({
+      source:"Message attachment",fileName:safeZipFileName(file.name),sizeBytes:Number(file.size)||null,
+      attachmentId:file.id,messageId:message.id,folder:"attachments/messages",
+    })));
     const portalFiles = await listAllCaseEvidence(caseId);
     if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
     const unavailable = (fresh.files||[]).filter(file=>!file.storage_path);
@@ -3193,10 +3632,12 @@ async function exportCaseZip(){
         storagePath:file.storage_path, sizeBytes:Number(file.size_bytes)||null,
         folder:file.source === "email" ? "attachments/email" : "attachments/case-files",
       })),
+      ...messageAttachmentFiles,
     ];
     const seenStoragePaths = new Set(), expected = candidates.filter(file=>{
-      if(seenStoragePaths.has(file.storagePath)) return false;
-      seenStoragePaths.add(file.storagePath); return true;
+      const identity=file.attachmentId?`message:${file.attachmentId}`:`storage:${file.storagePath}`;
+      if(seenStoragePaths.has(identity)) return false;
+      seenStoragePaths.add(identity); return true;
     });
     if(expected.length > MAX_CASE_EXPORT_ATTACHMENTS){
       throw new Error(`This case has more than ${MAX_CASE_EXPORT_ATTACHMENTS.toLocaleString()} attachments. Contact support for an archival export.`);
@@ -3208,7 +3649,12 @@ async function exportCaseZip(){
     let totalBytes = 0;
     for(const [index,file] of expected.entries()){
       if(status?.isConnected) status.textContent = `Adding attachments ${index+1}/${expected.length}…`;
-      const { data, error } = await sb.storage.from("evidence").download(file.storagePath);
+      let data,error;
+      if(file.attachmentId){
+        const authorized=await authorizeMessageAttachment(caseId,null,file.attachmentId,null);
+        if(!authorized.url){error=authorized.error||new Error("authorization failed");}
+        else try {const response=await fetch(authorized.url,{credentials:"omit",referrerPolicy:"no-referrer"});if(!response.ok)throw new Error("download failed");data=await response.blob();}catch(downloadError){error=downloadError;}
+      }else ({data,error}=await sb.storage.from("evidence").download(file.storagePath));
       if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
       if(error || !data) throw new Error(`A complete export cannot be created because “${file.fileName}” could not be retrieved.`);
       const bytes = new Uint8Array(await data.arrayBuffer());
@@ -3218,19 +3664,24 @@ async function exportCaseZip(){
       const zipPath = uniqueZipPath(file.folder, file.fileName, used);
       zipAttachments.push({name:zipPath,data:bytes});
       attachmentMetadata.push({
-        file_name:file.fileName, source:file.source, storage_path:file.storagePath,
+        file_name:file.fileName, source:file.source, storage_path:file.storagePath||null,
+        message_id:file.messageId||null, message_attachment_id:file.attachmentId||null,
         zip_path:zipPath, size_bytes:bytes.byteLength,
       });
     }
     if(status?.isConnected) status.textContent = "Verifying attachments…";
-    const [finalPortalFiles, finalCaseFiles] = await Promise.all([
+    const [finalPortalFiles, finalCaseFiles, finalMessageList] = await Promise.all([
       listAllCaseEvidence(caseId), fetchAllCaseExportRows("case_files",caseId,"created_at"),
+      messageAttachmentAction({action:"list",mode:"handler",caseId}),
     ]);
     if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
     if(portalInventorySignature(finalPortalFiles) !== portalInventorySignature(portalFiles)
       || caseFileInventorySignature(finalCaseFiles) !== caseFileInventorySignature(fresh.files||[])){
       throw new Error("Attachments changed while the export was being prepared. Retry to capture the latest files.");
     }
+    if(finalMessageList.error) throw new Error("A complete export cannot be created because message attachments could not be reauthorized.");
+    const messageSignature=list=>(list||[]).flatMap(m=>(m.attachments||[]).map(f=>[m.id,f.id,f.name,f.type,Number(f.size)||0].join("|")).sort()).join("\n");
+    if(messageSignature(finalMessageList.data?.messages)!==messageSignature(messageListResult.data?.messages)) throw new Error("Message attachments changed while the export was being prepared. Retry to capture the latest files.");
     const finalAccess = await assertFreshCaseExportAccess(caseId);
     if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
     if(finalAccess.updated_at !== fresh.c.updated_at) throw new Error("The case changed while the export was being prepared. Retry to capture the latest record.");
@@ -3261,10 +3712,37 @@ async function exportCaseZip(){
   }
 }
 
+function medicalInviteHtml(){
+  if(medicalInvite.status==="loading"||!medicalInvite.status)return `<div class="card login-card medical-return"><div class="medical-head"><div><div class="mini-l">Secure document return</div><h2 class="section">Checking your invitation</h2></div><span class="spin"></span></div><p>Confirming this request for your signed-in email…</p></div>`;
+  if(medicalInvite.status==="error"){
+    const code=medicalInvite.error?.code||"";
+    const copy=code==="INVITE_EXPIRED"?"This secure request has expired. Contact People Support for a new invitation."
+      :code==="NOT_FOUND"?"This secure request is no longer available."
+      :code==="AUTH_REQUIRED"?"Sign in with the email that received this invitation."
+      :code==="CASE_UNAVAILABLE"||code==="NOT_MEDICAL_STAFF"?"This invitation does not match your signed-in email or is no longer available."
+      :"The secure request could not be opened. Try again or contact People Support.";
+    return `<div class="card login-card medical-return"><div class="mini-l">Secure document return</div><h2 class="section">Invitation unavailable</h2><div class="banner err">${esc(copy)}</div>${!['INVITE_EXPIRED','NOT_FOUND','CASE_UNAVAILABLE','NOT_MEDICAL_STAFF'].includes(code)?'<button class="btn sm ghost" onclick="renderMedicalInviteInto(document.getElementById(\'app\'),true)">Retry</button>':''}<p class="note-sm">For privacy, this page does not reveal case details when access fails.</p></div>`;
+  }
+  const request=medicalInvite.request||{};
+  return `<div class="card login-card medical-return"><div class="mini-l">Secure document return</div><h2 class="section">Upload requested documents</h2><div class="banner info"><b>${esc(request.requestKind==='fmla'?'Medical leave':'Accommodation')} request ${esc(request.caseRef||'')}</b><br>${request.dueAt?`Requested by ${fmt(request.dueAt)}. This is an administrative follow-up date, not an automatic denial date.`:'No requested-by date is currently shown.'}</div><p>You may upload a provider letter or another supported PDF, image, or Word document. A particular blank form or signature is not required by this page.</p><label for="medical-return-files">Documents</label><input id="medical-return-files" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.doc,.docx" onchange="setMedicalReturnFiles(this.files)"><div class="row"><div class="col"><span class="mini-l">Document kind</span><select id="medical-return-kind"><option value="provider_note">Provider letter</option><option value="accommodation">Accommodation document</option><option value="fmla">Medical leave document</option><option value="other">Other requested document</option></select></div><div class="col"><span class="mini-l">Display label (optional)</span><input id="medical-return-label" maxlength="120" type="text" autocomplete="off"></div></div><button class="btn" ${medicalInvite.busy?'disabled aria-busy="true"':''} onclick="submitMedicalReturnFiles()">${medicalInvite.busy?'Uploading…':'Upload securely'}</button>${medicalInvite.error?`<div class="banner err">${esc(medicalInvite.error.message||medicalInvite.error)}</div>`:""}${medicalInvite.status==="complete"?'<div class="banner ok">Your document was uploaded. You may add another document or close this tab.</div>':''}${medicalInvite.documents.length?`<div class="divider"></div><b>Documents received for this request</b>${medicalInvite.documents.map(d=>`<div class="task"><span>${esc(d.label||'Document')}<span class="muted" style="font-size:11px"> · ${esc(d.kind||'')} · ${fmtBytes(d.sizeBytes)}</span></span><span class="chip">received</span></div>`).join('')}`:''}<p class="note-sm">This page grants access only to this return request. The invitation stays in memory for this tab and is cleared when you sign out.</p></div>`;
+}
+async function renderMedicalInviteInto(el,retry=false){
+  if(!medicalInviteToken||!session)return;
+  if(retry){medicalInvite.status="";medicalInvite.error="";medicalInvite.generation+=1;}
+  if(!medicalInvite.status){medicalInvite.status="loading";el.innerHTML=medicalInviteHtml();const token=medicalInviteToken,epoch=sessionEpoch,userId=session.user.id,generation=medicalInvite.generation;const result=await medicalAction({action:"redeem_return_invite",token});if(token!==medicalInviteToken||epoch!==sessionEpoch||session?.user?.id!==userId||generation!==medicalInvite.generation)return;if(result.error){medicalInvite.status="error";medicalInvite.error=result.error;}else{medicalInvite.status="ready";medicalInvite.error="";medicalInvite.request=result.data?.request||null;medicalInvite.documents=result.data?.documents||[];}if(el.isConnected&&medicalInviteToken===token){el.innerHTML=medicalInviteHtml();hardenMedicalFileInputs(el);}return;}el.innerHTML=medicalInviteHtml();hardenMedicalFileInputs(el);
+}
+function setMedicalReturnFiles(files){medicalInvite.files=Array.from(files||[]);medicalInvite.error="";if(medicalInvite.status==="complete")medicalInvite.status="ready";}
+async function submitMedicalReturnFiles(){
+  const files=[...medicalInvite.files];if(!files.length){medicalInvite.error={message:"Choose at least one PDF, image, or Word document."};$("app").innerHTML=medicalInviteHtml();return;}const invalid=files.find(f=>!medicalFileInfo(f).valid);if(invalid){medicalInvite.error={message:`${invalid.name} is empty, too large, or has an unsupported file type.`};$("app").innerHTML=medicalInviteHtml();return;}
+  const token=medicalInviteToken,epoch=sessionEpoch,userId=session?.user?.id,generation=medicalInvite.generation,kind=$("medical-return-kind")?.value||"other",label=($("medical-return-label")?.value||"").trim();medicalInvite.busy=true;medicalInvite.error="";$("app").innerHTML=medicalInviteHtml();const current=()=>token===medicalInviteToken&&epoch===sessionEpoch&&session?.user?.id===userId&&generation===medicalInvite.generation;
+  try{for(const file of files){const info=medicalFileInfo(file),requestId=crypto.randomUUID();const prepared=await medicalAction({action:"prepare_return_upload",token,requestId,file:{name:file.name,type:info.type,size:file.size},kind,...(label?{label}:{})});if(!current())return;if(prepared.error)throw prepared.error;const upload=prepared.data?.file;if(!upload?.bucket||!upload?.uploadPath||!upload?.token)throw new Error("The private upload authorization was unavailable.");const uploaded=await sb.storage.from(upload.bucket).uploadToSignedUrl(upload.uploadPath,upload.token,file,{contentType:info.type});if(!current())return;if(uploaded.error)throw uploaded.error;const committed=await medicalAction({action:"commit_return_upload",token,requestId,uploadId:prepared.data.uploadId});if(!current())return;if(committed.error)throw committed.error;if(committed.data)medicalInvite.documents=[committed.data,...medicalInvite.documents];}medicalInvite.files=[];medicalInvite.busy=false;medicalInvite.status="complete";$("app").innerHTML=medicalInviteHtml();}catch(error){if(current()){medicalInvite.busy=false;medicalInvite.error={message:error?.message||"Upload failed. Retry from the original file."};medicalInvite.status="ready";$("app").innerHTML=medicalInviteHtml();}}
+}
+
 function render(){
   renderUserBox(); renderNav();
   const el = $("app");
   if(!session){ el.innerHTML = renderLogin(); return; }
+  if(medicalInviteToken){ void renderMedicalInviteInto(el); return; }
   if((view==="dashboard"||view==="lookup") && !isHandler) view="home";
   if(view==="home"){ el.innerHTML = renderHome(); }
   else if(view==="incident"){ el.innerHTML = renderIncident(); }

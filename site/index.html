@@ -268,7 +268,16 @@
   .msg.email{background:var(--surface-2);color:var(--ink);align-self:flex-start;border:1px dashed var(--line-2);border-bottom-left-radius:6px}
   .msg .who{font-size:10.5px;color:var(--muted);font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:3px}
   .msg.handler .who{color:var(--on-green)}
+  .message-file .muted{color:#444}
+  .message-file .btn.ghost,.message-file .btn.sec{color:#111;border-color:#777;background:#fff}
   .msg a{color:inherit;text-decoration:underline;text-underline-offset:2px}
+  .message-files{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+  .message-file{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 8px;border:1px solid #777;border-radius:9px;background:#fff;color:#111}
+  .message-file-name{font-weight:700;min-width:0;overflow-wrap:anywhere}
+  .message-file .file-actions{margin-left:auto}
+  .message-compose{display:grid;grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) auto;gap:8px;align-items:end}
+  .message-compose textarea{resize:vertical;min-height:46px}
+  .file-actions,.preview-actions{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
 
   .spin{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:var(--ink);border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -320,6 +329,26 @@
   .legal-preview-canvas{display:grid;place-items:center;margin-top:16px;height:min(68vh,720px);overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
   .legal-preview-canvas iframe{display:block;width:100%;height:100%;border:0}
   .legal-preview-canvas img{display:block;max-width:100%;max-height:100%;object-fit:contain}
+  .legal-preview-canvas audio{width:min(640px,calc(100% - 24px))}
+  .legal-preview-canvas video{display:block;max-width:100%;max-height:100%}
+  .legal-preview-canvas audio,.legal-preview-canvas video{display:block;max-width:100%;max-height:100%}
+  .attachment-text-preview{align-self:stretch;justify-self:stretch;margin:0;padding:16px;color:#111;background:#fff;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;text-align:left}
+  .medical-panel{border:2px solid var(--ink);background:linear-gradient(180deg,var(--surface),var(--surface-2))}
+  .medical-head,.medical-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .medical-boundary{margin-top:12px}
+  .medical-upload{display:grid;gap:10px;margin-top:16px;padding:14px;border:1px solid var(--line-2);border-radius:12px;background:var(--surface)}
+  .medical-document{align-items:flex-start}
+  .medical-document>span:first-child{min-width:0;overflow-wrap:anywhere}
+  .medical-document .chip{margin-left:6px}
+  .medical-request-list{margin-top:14px}
+  .medical-qr{display:block;width:min(240px,100%);height:auto;margin:14px auto;border:12px solid #fff;border-radius:10px}
+  .medical-secret{margin:12px 0;overflow-wrap:anywhere}
+  .medical-secret code{display:block;margin-top:5px;font-size:14px;letter-spacing:.08em;user-select:all}
+  .medical-audit,.medical-retention{margin-top:14px}
+  .medical-retention{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px}
+  .check-line{display:flex;gap:8px;align-items:flex-start;text-transform:none;letter-spacing:0;font-weight:500;color:var(--ink-2)}
+  .check-line input{width:auto;margin-top:2px}
+  .medical-return{max-width:760px}
   #manualbox .card{box-shadow:var(--glow)}
 
   /* ---- case detail panels ---- */
@@ -330,6 +359,10 @@
   .iv-row{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px;background:var(--surface-2);display:flex;flex-direction:column}
   .iv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
   .iv-grid input,.iv-grid select{width:100%}
+  .interview-pairs{display:grid;gap:10px;margin:12px 0}
+  .interview-pair{border-left:3px solid var(--line);padding:8px 0 8px 12px;display:grid;gap:7px}
+  .interview-pair textarea{min-height:58px}
+  .interview-summary h3{font-size:12px;margin:12px 0 5px}
   .reassign{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px;padding:12px;border:1px solid rgba(255,255,255,.25);border-radius:12px;background:var(--surface-2)}
   .reassign select{width:auto;min-width:150px} .reassign input{width:auto;flex:1;min-width:160px}
   .party-editor{margin:8px 0 12px;padding:14px;border:1px solid var(--line-2);border-radius:12px;background:var(--surface-2)}
@@ -389,6 +422,12 @@
     .mobile-form-actions .btn{flex:1}
     .kv .k{width:100px}
     .msg{max-width:92%}
+    .message-compose{grid-template-columns:1fr}
+    .message-compose>.btn{width:100%}
+    .message-file .file-actions{width:100%;margin-left:0}
+    .medical-document{display:grid;gap:8px}
+    .medical-document .file-actions{width:100%;margin-left:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+    .medical-document .file-actions .btn{width:100%}
     table{font-size:13px} td,th{padding:10px 8px}
     .card:has(>table){padding-bottom:38px}
     .card:has(>table)::after{content:"Swipe → for more columns";position:absolute;right:16px;bottom:10px;color:var(--muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
