@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected_paths="$(printf '%s\n' \
+          core_paths="$(printf '%s\n' \
             .github/workflows/deploy-pages.yml \
             README.md \
             SOURCE_RELEASE.md \
@@ -34,15 +34,25 @@ jobs:
             site/minizip.js \
             site/store_locations.js \
             site/store_org.js)"
+          allowed_paths="$(printf '%s\n' "$core_paths" site/statement_template.js | LC_ALL=C sort)"
+          expected_paths="$core_paths"
+          files=(app.js config.js index.html minizip.js store_locations.js store_org.js)
+          if test -f site/statement_template.js; then
+            expected_paths="$allowed_paths"
+            files+=(statement_template.js)
+          fi
           actual_paths="$(find . -path './.git' -prune -o -type f -printf '%P\n' | LC_ALL=C sort)"
           history_paths="$(git log --all --pretty=format: --name-only | sed '/^$/d' | LC_ALL=C sort -u)"
           test "$actual_paths" = "$expected_paths"
-          test "$history_paths" = "$expected_paths"
+          test -z "$(comm -23 <(printf '%s\n' "$history_paths") <(printf '%s\n' "$allowed_paths"))"
           test -z "$(find . -path './.git' -prune -o -type l -print -quit)"
+          if grep -q 'statement_template[.]js' site/app.js; then
+            test -f site/statement_template.js
+          fi
 
           grep -Eq '^- Private source commit: `[0-9a-f]{40}` \(PR #[1-9][0-9]*\)$' SOURCE_RELEASE.md
-          test "$(grep -Ec '^\| `site/[^`]+` \| `[0-9a-f]{64}` \|$' SOURCE_RELEASE.md)" -eq 6
-          for file in app.js config.js index.html minizip.js store_locations.js store_org.js; do
+          test "$(grep -Ec '^\| `site/[^`]+` \| `[0-9a-f]{64}` \|$' SOURCE_RELEASE.md)" -eq "${#files[@]}"
+          for file in "${files[@]}"; do
             expected="$(awk -F'`' -v path="site/$file" '$2 == path { print $4 }' SOURCE_RELEASE.md)"
             actual="$(sha256sum "site/$file" | cut -d' ' -f1)"
             test "${#expected}" -eq 64
@@ -67,6 +77,7 @@ jobs:
           node --check site/minizip.js
           node --check site/store_org.js
           node --check site/store_locations.js
+          if test -f site/statement_template.js; then node --check site/statement_template.js; fi
 
   deploy:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
