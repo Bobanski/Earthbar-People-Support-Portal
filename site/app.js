@@ -429,9 +429,9 @@ function takeMedicalInviteToken(){
 }
 let medicalInviteToken=takeMedicalInviteToken();
 let medicalInvite={status:"",error:"",request:null,documents:[],files:[],kind:"accommodation",label:"",busy:false,generation:0};
-let medicalPanel={caseId:null,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",status:"",error:"",busy:false},audit:[],auditStatus:"idle",auditError:"",auditGroup:"all",auditCursor:null,auditGeneration:0,retention:[],generation:0};
+let medicalPanel={caseId:null,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",formType:"medical",status:"",error:"",busy:false},editingDueDate:null,audit:[],auditStatus:"idle",auditError:"",auditGroup:"all",auditCursor:null,auditGeneration:0,retention:[],generation:0};
 
-function blankMedicalPanel(caseId=null){return {caseId,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",status:"",error:"",busy:false},audit:[],auditStatus:"idle",auditError:"",auditGroup:"all",auditCursor:null,auditGeneration:medicalPanel.auditGeneration+1,retention:[],generation:medicalPanel.generation+1};}
+function blankMedicalPanel(caseId=null){return {caseId,status:"idle",error:"",capabilities:null,documents:[],returnRequests:[],files:[],kind:"accommodation",label:"",busy:false,mfa:{mode:"",factorId:"",qr:"",secret:"",error:"",busy:false},invite:{email:"",kind:"accommodation",dueDays:"14",dueAt:"",message:"",formType:"medical",status:"",error:"",busy:false},editingDueDate:null,audit:[],auditStatus:"idle",auditError:"",auditGroup:"all",auditCursor:null,auditGeneration:medicalPanel.auditGeneration+1,retention:[],generation:medicalPanel.generation+1};}
 function medicalCurrent(caseId,generation,epoch,userId){return selected===caseId&&medicalPanel.caseId===caseId&&medicalPanel.generation===generation&&sessionEpoch===epoch&&session?.user?.id===userId;}
 function medicalError(result){return result?.error||result?.data?.error||null;}
 async function medicalAction(body){
@@ -585,6 +585,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setMessageBody, setMessageFiles, sendMessageWithAttachments, previewMessageAttachment, downloadMessageAttachment, closeAttachmentPreview, downloadOpenAttachment,
   loadMedicalPanel, startMedicalMfa, verifyMedicalMfa, setMedicalFiles, uploadMedicalFiles, previewMedicalDocument, downloadMedicalDocument,
   setMedicalInviteField, createMedicalReturnRequest, resendMedicalReturnRequest, toggleMedicalLegalHold, loadMedicalAudit, setMedicalAuditGroup, previewMedicalRetention, enqueueMedicalRetention,
+  sendMedicalReturnForm, revokeMedicalReturnRequest, startMedicalDueDateEdit, setMedicalDueDateValue, cancelMedicalDueDateEdit, saveMedicalDueDate,
   setMedicalReturnFiles, submitMedicalReturnFiles });
 
 // ---------------- AUTH / BOOTSTRAP ----------------
@@ -2842,9 +2843,24 @@ function medicalDocumentHtml(caseId,d,index,permissions){
 function medicalReturnRequestsHtml(caseId){
   const inv=medicalPanel.invite;
   return `<div class="divider"></div><div class="medical-section-head"><b>Request documents from employee</b><span class="chip">verified recipient</span></div><p class="note-sm">The invitation is bound to this case, expires, and opens only for the signed-in recipient email. “Requested by” is an administrative follow-up date, not a legal deadline, and passing it does not automatically deny a request.</p><div class="row"><div class="col"><span class="mini-l">Recipient email</span><input id="medical-invite-email" type="email" value="${esc(inv.email)}" autocomplete="off" oninput="setMedicalInviteField('email',this.value)"></div><div class="col"><span class="mini-l">Document purpose</span><select id="medical-invite-kind" onchange="setMedicalInviteField('kind',this.value)"><option value="accommodation" ${inv.kind==='accommodation'?'selected':''}>Accommodation</option><option value="fmla" ${inv.kind==='fmla'?'selected':''}>Medical leave (FMLA)</option></select></div><div class="col"><span class="mini-l">Requested by (days)</span><input id="medical-invite-days" type="number" min="${inv.kind==='fmla'?15:1}" max="90" value="${esc(inv.dueDays)}" oninput="setMedicalInviteField('dueDays',this.value)"></div><div class="col"><span class="mini-l">Or requested-by date</span><input id="medical-invite-date" type="date" value="${esc(inv.dueAt)}" oninput="setMedicalInviteField('dueAt',this.value)"></div></div><span class="mini-l">Message (optional)</span><textarea id="medical-invite-message" maxlength="1000" oninput="setMedicalInviteField('message',this.value)">${esc(inv.message)}</textarea><button class="btn sm" ${inv.busy?'disabled aria-busy="true"':''} onclick="createMedicalReturnRequest('${caseId}')">${inv.busy?'Creating…':'Create secure return request'}</button><p class="note-sm">The employee may return a provider letter or another supported document. No blank form or signature is required by this screen.</p>${inv.error?`<div class="banner err">${esc(inv.error)}</div>`:""}${inv.status?`<div class="banner ok">${esc(inv.status)}</div>`:""}
-    ${medicalPanel.returnRequests.length?`<div class="medical-request-list">${medicalPanel.returnRequests.map(r=>`<div class="task"><span><b>${esc(r.recipientMasked||"Recipient")}</b><span class="muted" style="font-size:11px"> · ${esc(r.status||"")} · ${r.dueAt?'due '+fmt(r.dueAt):'due date sets when sent'} · expires ${r.expiresAt?fmt(r.expiresAt):'—'}</span></span><button class="btn sm ghost" onclick="resendMedicalReturnRequest('${caseId}','${esc(r.id)}')">Resend</button></div>`).join("")}</div>`:""}`;
+    ${medicalPanel.returnRequests.length?`<div class="medical-request-list">${medicalPanel.returnRequests.map(r=>medicalReturnRequestRowHtml(caseId,r)).join("")}</div>`:""}`;
 }
-const MEDICAL_AUDIT_ACTIONS={list:"Document list opened",signed_url_issued:"File access authorized",upload_prepared:"Upload started",upload_committed:"Document uploaded",return_committed:"Employee document returned",invite_created:"Document request created",invite_resent:"Document request resent",invite_redeemed:"Secure request opened",delivery_confirmed:"Request email sent",legal_hold_set:"Legal hold placed",legal_hold_released:"Legal hold released",retention_previewed:"Retention review previewed",retention_queued:"Retention review queued",retention_policy_changed:"Retention policy changed"};
+function medicalReturnRequestRowHtml(caseId,r){
+  const inv=medicalPanel.invite;
+  const edit=medicalPanel.editingDueDate?.requestId===r.id?medicalPanel.editingDueDate:null;
+  const active=["queued","sent"].includes(r.status);
+  const formLine=r.formSentAt?` · form sent ${fmt(r.formSentAt)}`:r.formType?" · form send queued":"";
+  const info=`${esc(r.status||"")} · ${r.dueAt?'due '+fmt(r.dueAt):'due date sets when sent'}${formLine} · expires ${r.expiresAt?fmt(r.expiresAt):'—'}`;
+  const controls=[
+    active&&!r.formSentAt&&!r.formType?`<select id="medical-form-type-${esc(r.id)}" aria-label="Blank form to send" onchange="setMedicalInviteField('formType',this.value)"><option value="medical" ${inv.formType==='medical'?'selected':''}>Medical form</option><option value="religious" ${inv.formType==='religious'?'selected':''}>Religious form</option></select><button class="btn sm sec" onclick="sendMedicalReturnForm('${caseId}','${esc(r.id)}')">Send form</button>`:"",
+    r.status==="sent"&&!edit?`<button class="btn sm ghost" onclick="startMedicalDueDateEdit('${caseId}','${esc(r.id)}')">Edit due date</button>`:"",
+    ["queued","sent","returned"].includes(r.status)?`<button class="btn sm ghost" onclick="resendMedicalReturnRequest('${caseId}','${esc(r.id)}')">Resend</button>`:"",
+    active?`<button class="btn sm ghost" onclick="revokeMedicalReturnRequest('${caseId}','${esc(r.id)}')">Revoke</button>`:"",
+  ].join("");
+  const editor=edit?`<div class="task medical-due-edit"><span><span class="mini-l">New requested-by date</span></span><span class="file-actions"><input id="medical-due-input-${esc(r.id)}" type="date" aria-label="New requested-by date" value="${esc(edit.value)}" oninput="setMedicalDueDateValue(this.value)"><button class="btn sm" ${edit.busy?'disabled aria-busy="true"':''} onclick="saveMedicalDueDate('${caseId}','${esc(r.id)}')">${edit.busy?'Saving…':'Save date'}</button><button class="btn sm ghost" onclick="cancelMedicalDueDateEdit()">Cancel</button></span></div>${edit.error?`<div class="banner err">${esc(edit.error)}</div>`:""}`:"";
+  return `<div class="task"><span><b>${esc(r.recipientMasked||"Recipient")}</b><span class="muted" style="font-size:11px"> · ${info}</span></span><span class="file-actions">${controls}</span></div>${editor}`;
+}
+const MEDICAL_AUDIT_ACTIONS={list:"Document list opened",signed_url_issued:"File access authorized",upload_prepared:"Upload started",upload_committed:"Document uploaded",return_committed:"Employee document returned",invite_created:"Document request created",invite_resent:"Document request resent",invite_redeemed:"Secure request opened",delivery_confirmed:"Request email sent",form_sent:"Blank form sent",invite_revoked:"Secure request revoked",due_date_overridden:"Requested-by date changed",legal_hold_set:"Legal hold placed",legal_hold_released:"Legal hold released",retention_previewed:"Retention review previewed",retention_queued:"Retention review queued",retention_policy_changed:"Retention policy changed"};
 function medicalAuditTime(value){if(!value)return "Time unavailable";const d=new Date(value);if(Number.isNaN(d.getTime()))return "Time unavailable";return new Intl.DateTimeFormat(undefined,{year:"numeric",month:"short",day:"numeric",hour:"numeric",minute:"2-digit",timeZoneName:"short"}).format(d);}
 function medicalAuditEventHtml(e){const outcome=e.outcome==="success"?"Succeeded":e.outcome==="denied"?"Denied":e.outcome==="skipped"?"Skipped":"Recorded";return `<li><div class="t" title="${esc(e.at||"")}">${esc(medicalAuditTime(e.at))} · ${esc(outcome)}</div><div class="e"><b>${esc(MEDICAL_AUDIT_ACTIONS[e.action]||"Medical vault activity")}</b>${e.documentLabel?` · ${esc(e.documentLabel)}`:""}</div><div class="note-sm">${esc(e.actorLabel||"Actor unavailable")}</div></li>`;}
 function medicalOperationsHtml(caseId,permissions=medicalPanel.capabilities?.permissions||{}){const a=medicalPanel;return `<div id="medical-operations"><div class="divider"></div><div class="medical-section-head"><b>Medical document access log</b><span class="chip">restricted</span></div><p class="note-sm">Shows activity recorded by the restricted medical service. “File access authorized” means access was approved; it does not prove a preview opened or a download completed.${permissions.retention?' Retention review is a dry run, and queueing does not delete files.':''}</p><div class="medical-audit-controls"><label><span class="mini-l">Activity type</span><select onchange="setMedicalAuditGroup('${caseId}',this.value)"><option value="all" ${a.auditGroup==='all'?'selected':''}>All activity</option><option value="access" ${a.auditGroup==='access'?'selected':''}>Document access</option><option value="uploads" ${a.auditGroup==='uploads'?'selected':''}>Uploads</option><option value="requests" ${a.auditGroup==='requests'?'selected':''}>Employee requests</option><option value="retention" ${a.auditGroup==='retention'?'selected':''}>Retention and holds</option></select></label><button class="btn sm ghost" ${a.auditStatus==='loading'?'disabled aria-busy="true"':''} onclick="loadMedicalAudit('${caseId}',false)">${a.auditStatus==='loading'?'Loading…':a.auditStatus==='ready'?'Refresh log':'Load access log'}</button>${permissions.retention?`<button class="btn sm ghost" onclick="previewMedicalRetention('${caseId}')">Preview retention candidates</button>`:""}</div><div class="medical-audit-result" role="status">${a.auditStatus==='error'?`<div class="banner err">${esc(a.auditError||"The access log could not be loaded.")}</div>`:a.auditStatus==='ready'&&!a.audit.length?'<p class="muted">No recorded activity matches this filter.</p>':a.audit.length?`<ul class="timeline medical-audit">${a.audit.map(medicalAuditEventHtml).join("")}</ul>${a.auditCursor?`<button class="btn sm ghost" ${a.auditStatus==='loading'?'disabled':''} onclick="loadMedicalAudit('${caseId}',true)">Load older activity</button>`:""}`:'<p class="muted">Load the log to review medical document activity.</p>'}</div>${permissions.retention&&a.retention.length?`<div class="medical-retention"><p><b>Dry-run candidates</b></p>${a.retention.map(c=>`<label class="check-line"><input type="checkbox" data-medical-retention-id="${esc(c.id)}"> ${esc(c.id)} · eligible ${c.eligibleAt?fmt(c.eligibleAt):'—'}</label>`).join("")}<button class="btn sm ghost" onclick="enqueueMedicalRetention('${caseId}')">Queue selected for review</button></div>`:""}</div>`;}
@@ -2899,9 +2915,75 @@ function findMedicalDocument(id){return medicalPanel.documents.find(d=>d.id===id
 async function authorizeMedicalDocument(caseId,documentId,disposition){const result=await medicalAction({action:"download",caseId,documentId,disposition});return {url:result.data?.url,error:result.error,note:"Restricted preview access expires after one minute."};}
 async function previewMedicalDocument(caseId,documentId,restoreId){const source=medicalPanel,generation=source.generation,d=findMedicalDocument(documentId);if(!d)return;await openAttachmentPreview({name:d.label||"Medical document",type:d.mimeType||"",kindOverride:medicalPreviewKind(d),restoreId,isCurrent:()=>selected===caseId&&medicalPanel===source&&medicalPanel.generation===generation&&!!findMedicalDocument(documentId),authorize:()=>authorizeMedicalDocument(caseId,documentId,"inline"),download:()=>downloadMedicalDocument(caseId,documentId)});}
 async function downloadMedicalDocument(caseId,documentId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await authorizeMedicalDocument(caseId,documentId,"attachment");if(!medicalCurrent(caseId,generation,epoch,userId)||!findMedicalDocument(documentId))return;if(!result.url){alert("Could not authorize this restricted download: "+(result.error?.message||"unknown error"));return;}const a=document.createElement("a");a.href=result.url;a.target="_blank";a.rel="noopener noreferrer";a.referrerPolicy="no-referrer";document.body.appendChild(a);a.click();a.remove();}
-function setMedicalInviteField(field,value){if(!["email","kind","dueDays","dueAt","message"].includes(field))return;medicalPanel.invite[field]=value;if(field==="kind"&&value==="fmla"&&Number(medicalPanel.invite.dueDays)<15)medicalPanel.invite.dueDays="15";medicalPanel.invite.error="";medicalPanel.invite.status="";medicalPanel.invite.idempotencyKey="";if(field==="kind")paintMedicalPanel();}
+function setMedicalInviteField(field,value){if(!["email","kind","dueDays","dueAt","message","formType"].includes(field))return;if(field==="formType"&&!["medical","religious"].includes(value))return;medicalPanel.invite[field]=value;if(field==="kind"&&value==="fmla"&&Number(medicalPanel.invite.dueDays)<15)medicalPanel.invite.dueDays="15";medicalPanel.invite.error="";medicalPanel.invite.status="";medicalPanel.invite.idempotencyKey="";if(field==="kind")paintMedicalPanel();}
 async function createMedicalReturnRequest(caseId){const inv=medicalPanel.invite,email=inv.email.trim().toLowerCase(),days=Number(inv.dueDays);if(!/^\S+@\S+\.\S+$/.test(email)){inv.error="Enter the recipient's email address.";paintMedicalPanel();return;}if(inv.kind==="fmla"&&!inv.dueAt&&(!Number.isFinite(days)||days<15)){inv.error="Medical leave requests need a requested-by date or at least 15 days.";paintMedicalPanel();return;}inv.busy=true;inv.error="";inv.status="";inv.idempotencyKey||=crypto.randomUUID();paintMedicalPanel();const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;const result=await medicalAction({action:"create_return_request",caseId,recipientEmail:email,requestKind:inv.kind,...(inv.dueAt?{dueAt:new Date(inv.dueAt+"T12:00:00Z").toISOString()}:{dueDays:days||14}),...(inv.message.trim()?{message:inv.message.trim()}:{}),idempotencyKey:inv.idempotencyKey});if(!medicalCurrent(caseId,generation,epoch,userId))return;inv.busy=false;if(result.error){inv.error=result.error.message||"The request could not be created.";paintMedicalPanel();return;}inv.status="Secure request queued. Its requested-by date will be set when delivery succeeds.";inv.idempotencyKey="";medicalPanel.returnRequests=[result.data?.request,...medicalPanel.returnRequests].filter(Boolean);paintMedicalPanel();}
 async function resendMedicalReturnRequest(caseId,returnRequestId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"resend_return_request",caseId,returnRequestId,idempotencyKey:crypto.randomUUID()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){medicalPanel.invite.error=result.error.message||"The request could not be resent.";}else medicalPanel.invite.status="Resend queued. The original due date is preserved.";paintMedicalPanel();}
+function updateMedicalReturnRow(returnRequestId,request){const index=medicalPanel.returnRequests.findIndex(r=>r.id===returnRequestId);if(index>=0&&request)medicalPanel.returnRequests[index]={...medicalPanel.returnRequests[index],...request};}
+async function sendMedicalReturnForm(caseId,returnRequestId){
+  const inv=medicalPanel.invite,formType=inv.formType;
+  if(!["medical","religious"].includes(formType)){inv.error="Choose the medical or religious accommodation form first.";paintMedicalPanel();return;}
+  inv.error="";inv.status="";
+  const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;
+  const result=await medicalAction({action:"send_return_form",caseId,returnRequestId,formType,idempotencyKey:crypto.randomUUID()});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(result.error){
+    const code=result.error.code;
+    medicalPanel.invite.error=code==="ALREADY_SENT"?"A blank form was already sent for this request.":code==="ALREADY_TERMINAL"?"This request is no longer active.":result.error.message||"The form could not be sent.";
+  }else{
+    updateMedicalReturnRow(returnRequestId,result.data?.request);
+    medicalPanel.invite.status="Blank form queued for delivery with the secure return link.";
+  }
+  paintMedicalPanel();
+}
+async function revokeMedicalReturnRequest(caseId,returnRequestId){
+  const reason=prompt("Reason for revoking this secure request:","");
+  if(reason===null||!reason.trim())return;
+  medicalPanel.invite.error="";medicalPanel.invite.status="";
+  const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;
+  const result=await medicalAction({action:"revoke_return_request",caseId,returnRequestId,reason:reason.trim()});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  if(result.error){
+    const code=result.error.code;
+    medicalPanel.invite.error=code==="ALREADY_TERMINAL"?"This request has already ended (returned, revoked, or expired).":result.error.message||"The request could not be revoked.";
+  }else{
+    updateMedicalReturnRow(returnRequestId,result.data?.request);
+    if(medicalPanel.editingDueDate?.requestId===returnRequestId)medicalPanel.editingDueDate=null;
+    medicalPanel.invite.status="The secure request was revoked. Its link no longer works; the employee is not notified.";
+  }
+  paintMedicalPanel();
+}
+function startMedicalDueDateEdit(caseId,returnRequestId){
+  if(medicalPanel.caseId!==caseId)return;
+  const r=medicalPanel.returnRequests.find(x=>x.id===returnRequestId);
+  if(!r||r.status!=="sent")return;
+  medicalPanel.editingDueDate={requestId:returnRequestId,value:r.dueAt?String(r.dueAt).slice(0,10):"",error:"",busy:false};
+  paintMedicalPanel();
+}
+function setMedicalDueDateValue(value){if(medicalPanel.editingDueDate)medicalPanel.editingDueDate.value=value;}
+function cancelMedicalDueDateEdit(){medicalPanel.editingDueDate=null;paintMedicalPanel();}
+async function saveMedicalDueDate(caseId,returnRequestId){
+  const edit=medicalPanel.editingDueDate;
+  if(!edit||edit.requestId!==returnRequestId||edit.busy)return;
+  const value=(edit.value||"").trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(value)){edit.error="Enter a valid date.";paintMedicalPanel();return;}
+  const dueAt=new Date(value+"T12:00:00Z").toISOString();
+  edit.busy=true;edit.error="";paintMedicalPanel();
+  const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;
+  const result=await medicalAction({action:"update_return_due_date",caseId,returnRequestId,dueAt});
+  if(!medicalCurrent(caseId,generation,epoch,userId))return;
+  const current=medicalPanel.editingDueDate;
+  if(!current||current.requestId!==returnRequestId)return;
+  current.busy=false;
+  if(result.error){
+    const code=result.error.code;
+    current.error=code==="INVALID_DUE_DATE"?"Choose a future date. Medical leave (FMLA) requests need at least 15 days from first send.":code==="ALREADY_TERMINAL"?"This request is no longer active.":result.error.message||"The due date could not be updated.";
+    paintMedicalPanel();return;
+  }
+  updateMedicalReturnRow(returnRequestId,result.data?.request);
+  medicalPanel.editingDueDate=null;
+  medicalPanel.invite.status="The requested-by date was updated.";
+  paintMedicalPanel();
+}
 async function toggleMedicalLegalHold(caseId,documentId,enabled){const reason=prompt(enabled?"Reason for placing this document on hold:":"Reason for releasing this document hold:","");if(reason===null||!reason.trim())return;const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"set_legal_hold",caseId,documentId,enabled,reason:reason.trim()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"The hold could not be updated.");return;}const index=medicalPanel.documents.findIndex(d=>d.id===documentId);if(index>=0)medicalPanel.documents[index]={...medicalPanel.documents[index],...(result.data||{}),legalHold:enabled};paintMedicalPanel();}
 function setMedicalAuditGroup(caseId,group){if(!["all","access","uploads","requests","retention"].includes(group)||medicalPanel.caseId!==caseId)return;medicalPanel.auditGroup=group;medicalPanel.audit=[];medicalPanel.auditCursor=null;medicalPanel.auditStatus="idle";medicalPanel.auditError="";medicalPanel.auditGeneration++;paintMedicalOperations();void loadMedicalAudit(caseId,false);}
 async function loadMedicalAudit(caseId,append=false){if(medicalPanel.auditStatus==="loading")return;const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,group=medicalPanel.auditGroup,beforeId=append?medicalPanel.auditCursor:null,auditGeneration=++medicalPanel.auditGeneration;medicalPanel.auditStatus="loading";medicalPanel.auditError="";if(!append){medicalPanel.audit=[];medicalPanel.auditCursor=null;}paintMedicalOperations();const result=await medicalAction({action:"audit_list",caseId,limit:25,group,...(beforeId?{beforeId}:{})});if(!medicalCurrent(caseId,generation,epoch,userId)||medicalPanel.auditGroup!==group||medicalPanel.auditGeneration!==auditGeneration)return;if(result.error){if(["AUTH_REQUIRED","MFA_REQUIRED","CASE_UNAVAILABLE","NOT_MEDICAL_STAFF"].includes(result.error.code)){medicalPanel=blankMedicalPanel(caseId);medicalPanel.status="error";medicalPanel.error=result.error;paintMedicalPanel();return;}medicalPanel.audit=[];medicalPanel.auditCursor=null;medicalPanel.auditStatus="error";medicalPanel.auditError=result.error.message||"The access log could not be loaded.";paintMedicalOperations();return;}medicalPanel.audit=append?[...medicalPanel.audit,...(result.data?.events||[])]:result.data?.events||[];medicalPanel.auditCursor=result.data?.nextCursor||null;medicalPanel.auditStatus="ready";paintMedicalOperations();}
