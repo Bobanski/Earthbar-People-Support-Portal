@@ -496,7 +496,7 @@ function blankIncident(isManual = false){
   return { anonymous:false, location:"", usState:"", relationship:"Employee", role:"",
     category:CATEGORIES[0], parties:[], pQuery:"", pType:"employee", pName:"",
     pRoles:["subject"], description:"", email:"", phone:"", files:[], manual:isManual,
-    incidentDate: todayStr() };
+    incidentDate: todayStr(), kind:"case" };
 }
 const OTHER_LOCATION = "Other / not store-specific";
 const REFERENCE_STATE_MAP = Object.fromEntries(STORE_LOCATIONS.map(location => [location.name, location.state]));
@@ -573,7 +573,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   syncInterviewDraft, addInterviewPair, removeInterviewPair, moveInterviewPair, downloadBlankStatement, downloadFilledStatement,
   toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
-  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, discardManualDraft,
+  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
@@ -1115,7 +1115,10 @@ const dashboardInvolved = c => (c.case_parties||[]).map(p =>
 const dashboardLocState = c => c.location ? `${esc(c.location)}${c.us_state?`, ${esc(c.us_state)}`:""}` : (c.us_state?esc(c.us_state):"—");
 function dashboardModel(){
   const isReq = dashView === "requests";
-  const pool = dashboardData.filter(c => isReq ? c.intake_type === "request" : c.intake_type !== "request");
+  const isClosed = dashView === "closed";
+  const pool = dashboardData.filter(c => isClosed
+    ? c.state === "Closed"
+    : (isReq ? c.intake_type === "request" : c.intake_type !== "request") && c.state !== "Closed");
   const now = Date.now();
   const q = filters.q.trim().toLowerCase();
   const employeeId = filters.mine ? myWorkEmployeeId() : null;
@@ -1129,18 +1132,19 @@ function dashboardModel(){
     (!filters.cat || c.category===filters.cat) &&
     (!filters.state || c.state===filters.state) &&
     (!filters.handler || (filters.handler==="__ext" ? c.external : c.handler_id===filters.handler)) &&
-    (!isReq || !filters.acc || (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc)) &&
-    (!isReq || !filters.dur || c.accommodation_duration===filters.dur) &&
+    (!(isReq || isClosed) || !filters.acc || (c.intake_type==="request" && (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc))) &&
+    (!(isReq || isClosed) || !filters.dur || (c.intake_type==="request" && c.accommodation_duration===filters.dur)) &&
     (!filters.us || c.us_state===filters.us) &&
     (!filters.leader || caseDistrictLeader(c)===filters.leader) &&
     caseOpenedInPeriod(c, filters.period) &&
     (!q || [c.ref,c.description,c.location,dashboardInvolved(c)].some(v => (v||"").toLowerCase().includes(q)))
   );
   if (filters.mine) shown.sort((a,b) => compareMyWork(a,b,now));
-  return { isReq, pool, shown, now };
+  return { isReq, isClosed, pool, shown, now };
 }
 function dashboardFilterChipEntries(){
   const isReq = dashView === "requests";
+  const isClosed = dashView === "closed";
   const quickLabels = isReq
     ? { open:"Open requests" }
     : { open:"Open cases", high:"High risk", overdue:"SLA overdue" };
@@ -1150,7 +1154,7 @@ function dashboardFilterChipEntries(){
   if (filters.q.trim()) entries.push({ key:"q", label:`Search: “${filters.q.trim()}”` });
   const labels = {
     risk:"Risk", cat:isReq?"Request type":"Category", state:isReq?"Request status":"Status",
-    handler:isReq?"Case owner":"Handler", acc:"Outcome", dur:"Duration", us:"Location state",
+    handler:isReq?"Case owner":(isClosed?"Owner / handler":"Handler"), acc:"Outcome", dur:"Duration", us:"Location state",
     leader:"District leader", period:"Period"
   };
   for (const key of ["risk","cat","state","handler","acc","dur","us","leader","period"]){
@@ -1172,7 +1176,16 @@ function dashboardActiveFiltersHtml(){
     `<button type="button" class="filter-chip" aria-label="Remove ${esc(label)} filter" onclick="clearDashboardFilter('${key}')"><span>${esc(label)}</span><span class="filter-chip-x" aria-hidden="true">×</span></button>`
   ).join("")}`;
 }
-function dashboardRowsHtml({isReq,shown,now}){
+function dashboardRowsHtml({isReq,isClosed,shown,now}){
+  if (isClosed) return shown.length ? shown.map(c=>{
+    const request = c.intake_type === "request";
+    return `<tr class="clk" onclick="openCase('${c.id}')">
+      <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open closed ${request?'request':'case'} ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td>
+      <td><span class="chip">${request?'Request':'Incident'}</span></td><td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${dashboardLocState(c)}</td>
+      <td>${esc(c.anonymous?'Anonymous':(c.reporter_display||'—'))}</td><td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
+      <td>${c.closed_at?fmtD(c.closed_at):'—'}</td><td>${closureLine(c)||'<span class="muted">—</span>'}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty-row">No closed cases or requests match these filters.</td></tr>`;
   if (isReq) return shown.length ? shown.map(c=>`<tr class="clk" onclick="openCase('${c.id}')">
     <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open request ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td>
     <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${esc(c.reporter_display||'—')}</td>
@@ -1195,7 +1208,7 @@ function updateDashboardResults(){
   body.innerHTML = dashboardRowsHtml(model);
   lastShown = model.shown;
   const result = $("dashboard-result-count");
-  if (result) result.textContent = `Showing ${model.shown.length} of ${model.pool.length} ${model.isReq?'requests':'cases'}`;
+  if (result) result.textContent = `Showing ${model.shown.length} of ${model.pool.length} ${model.isClosed?'closed items':(model.isReq?'requests':'cases')}`;
   const activeFilters = $("dashboard-active-filters");
   if (activeFilters) activeFilters.innerHTML = dashboardActiveFiltersHtml();
   const toggle = $("filter-toggle");
@@ -1226,66 +1239,78 @@ async function renderDashboardInto(el){
   if (epoch !== sessionEpoch || dashView !== dv || !el.isConnected) return;  // view/session changed while loading
   if(error){ el.innerHTML = `<div class="card"><div class="banner err">Could not load cases: ${esc(error.message)}</div></div>`; return; }
   dashboardData = all || [];
-  const { isReq, pool, shown, now } = dashboardModel();
+  const { isReq, isClosed, pool, shown, now } = dashboardModel();
   const open = pool.filter(c=>c.state!=="Closed").length;
+  const closedIncidents = pool.filter(c=>c.intake_type!=="request").length;
+  const closedRequests = pool.filter(c=>c.intake_type==="request").length;
   const hi = pool.filter(c=>caseRisk(c)==="High").length;
   const od = pool.filter(c=>dashboardOverdue(c,now)).length;
   // Filter options come from FIXED lists (plus anything present in the data), so
   // every category/state/team-member is offered even before any case uses it.
-  const catOpts = [...new Set([...(isReq?REQUEST_TYPES:CATEGORIES), ...pool.map(c=>c.category)])].filter(Boolean);
-  const stateOpts = isReq ? [...REQ_STATES,"Closed"]
-                          : [...new Set([...INCIDENT_STATES,"Closed","Reopened", ...pool.map(c=>c.state)])];
+  const catOpts = [...new Set([...(isClosed?[...CATEGORIES,...REQUEST_TYPES]:(isReq?REQUEST_TYPES:CATEGORIES)), ...pool.map(c=>c.category)])].filter(Boolean);
+  const stateOpts = isReq ? [...REQ_STATES]
+                          : [...new Set([...INCIDENT_STATES,"Reopened", ...pool.map(c=>c.state).filter(s=>s!=="Closed")])];
   const handlers = hrTeam.map(t=>[t.employee_id, nameOf(t.employee_id)]);
   lastShown = shown;   // what Export CSV downloads — exactly the filtered view
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
         <div class="dash-toggle">
-          <button class="${!isReq?'on':''}" onclick="setDashView('cases')">Cases</button>
-          <button class="${isReq?'on':''}" onclick="setDashView('requests')">Requests</button>
-          <button onclick="setDashView('wc')">Workers' Comp</button>
-          <button onclick="setDashView('legal')">Legal &amp; Claims</button>
+          <button class="${dashView==='cases'?'on':''}" aria-pressed="${dashView==='cases'}" onclick="setDashView('cases')">Cases</button>
+          <button class="${isReq?'on':''}" aria-pressed="${isReq}" onclick="setDashView('requests')">Requests</button>
+          <button class="${isClosed?'on':''}" aria-pressed="${isClosed}" onclick="setDashView('closed')">Closed</button>
+          <button aria-pressed="false" onclick="setDashView('wc')">Workers' Comp</button>
+          <button aria-pressed="false" onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
+         ${isClosed ? `
+         <div class="stat"><div class="n">${pool.length}</div><div class="l">Closed items</div></div>
+         <div class="stat"><div class="n">${closedIncidents}</div><div class="l">Incidents</div></div>
+         <div class="stat"><div class="n">${closedRequests}</div><div class="l">Requests</div></div>` : `
          <button type="button" class="stat stat-button ${filters.quick==='open'?'active':''}" data-quick-filter="open" aria-pressed="${filters.quick==='open'}" onclick="setDashboardQuickFilter('open')"><div class="n">${open}</div><div class="l">Open ${isReq?'requests':'cases'}</div><div class="stat-hint">Filter table</div></button>
          ${isReq
           ? `<button type="button" class="stat stat-button" onclick="clearDashboardFilters()"><div class="n">${pool.length}</div><div class="l">Total requests</div><div class="stat-hint">Show all</div></button>`
           : `<button type="button" class="stat stat-button ${filters.quick==='high'?'active':''}" data-quick-filter="high" aria-pressed="${filters.quick==='high'}" onclick="setDashboardQuickFilter('high')"><div class="n" style="color:${hi?'var(--danger)':'var(--ok)'}">${hi}</div><div class="l">High risk</div><div class="stat-hint">Filter table</div></button>
-             <button type="button" class="stat stat-button ${filters.quick==='overdue'?'active':''}" data-quick-filter="overdue" aria-pressed="${filters.quick==='overdue'}" onclick="setDashboardQuickFilter('overdue')"><div class="n" style="color:${od?'var(--warn)':'var(--ok)'}">${od}</div><div class="l">SLA overdue</div><div class="stat-hint">Filter table</div></button>`}
+             <button type="button" class="stat stat-button ${filters.quick==='overdue'?'active':''}" data-quick-filter="overdue" aria-pressed="${filters.quick==='overdue'}" onclick="setDashboardQuickFilter('overdue')"><div class="n" style="color:${od?'var(--warn)':'var(--ok)'}">${od}</div><div class="l">SLA overdue</div><div class="stat-hint">Filter table</div></button>`}`}
       </div>
       <div class="rule"></div>
       <div class="dash-actions">
-         <button id="my-work-toggle" class="btn sm ${filters.mine?'':'ghost'}" aria-pressed="${!!filters.mine}" onclick="toggleMyWork()">My Work</button>
+         ${isClosed?'':`<button id="my-work-toggle" class="btn sm ${filters.mine?'':'ghost'}" aria-pressed="${!!filters.mine}" onclick="toggleMyWork()">My Work</button>`}
          <button id="filter-toggle" class="btn sm ghost" aria-controls="dashboard-filters" aria-expanded="${showFilters}" onclick="toggleFilters()">${filterButtonText()}</button>
         <button class="btn sm ghost" onclick="exportCasesCsv()">Export CSV</button>
-        ${!isReq?`<button class="btn sm sec" style="margin-left:auto" onclick="toggleManual()">${showManual?'Cancel manual entry':(hasManualDraft()?'Resume draft case':'+ Add case manually')}</button>`:""}
+        ${!isClosed?`<button class="btn sm sec" style="margin-left:auto" onclick="toggleManual()">${showManual?'Cancel manual entry':(isReq
+          ?(hasManualDraft('request')?'Resume draft request':'+ Add request manually')
+          :(hasManualDraft('case')?'Resume draft case':'+ Add case manually'))}</button>`:""}
       </div>
-      <p id="my-work-hint" class="note-sm" ${filters.mine?'':'hidden'}>${esc(myWorkHint())}</p>
+      ${isClosed?'':`<p id="my-work-hint" class="note-sm" ${filters.mine?'':'hidden'}>${esc(myWorkHint())}</p>`}
       <div id="dashboard-active-filters" class="active-filter-list" aria-live="polite">${dashboardActiveFiltersHtml()}</div>
       <div id="dashboard-filters" class="filters filter-panel ${showFilters?'is-open':''}" aria-hidden="${!showFilters}" ${showFilters?'':'inert'}>
-        <div class="filter-panel-head"><div><b>Filter this dashboard</b><div id="dashboard-result-count" class="note-sm">Showing ${shown.length} of ${pool.length} ${isReq?'requests':'cases'}</div></div><button class="btn sm ghost" onclick="clearDashboardFilters()">Clear all</button></div>
+        <div class="filter-panel-head"><div><b>Filter this dashboard</b><div id="dashboard-result-count" class="note-sm">Showing ${shown.length} of ${pool.length} ${isClosed?'closed items':(isReq?'requests':'cases')}</div></div><button class="btn sm ghost" onclick="clearDashboardFilters()">Clear all</button></div>
         <div class="filter-grid">
           <label class="filter-field filter-search"><span>Search</span><input id="flt-q" data-filter-key="q" type="text" placeholder="Ref, description, location, person…" value="${esc(filters.q)}" oninput="applyFilters()"></label>
           ${!isReq?`<label class="filter-field"><span>Risk</span><select data-filter-key="risk" onchange="setFilter('risk',this.value);applyFilters()"><option value="">All risks</option>${RISKS.map(r=>`<option ${filters.risk===r?'selected':''}>${r}</option>`).join("")}</select></label>`:""}
           <label class="filter-field"><span>${isReq?'Request type':'Category'}</span><select data-filter-key="cat" onchange="setFilter('cat',this.value);applyFilters()"><option value="">All</option>${catOpts.map(c=>`<option ${filters.cat===c?'selected':''}>${esc(c)}</option>`).join("")}</select></label>
-          <label class="filter-field"><span>${isReq?'Request status':'Status'}</span><select data-filter-key="state" onchange="setFilter('state',this.value);applyFilters()"><option value="">All</option>${stateOpts.map(s=>`<option value="${s}" ${filters.state===s?'selected':''}>${stlabel(s)}</option>`).join("")}</select></label>
-          ${isReq?`<label class="filter-field"><span>Outcome</span><select data-filter-key="acc" onchange="setFilter('acc',this.value);applyFilters()"><option value="">All outcomes</option>${ACC_STATUS.map(s=>`<option ${filters.acc===s?'selected':''}>${s}</option>`).join("")}<option value="__none" ${filters.acc==='__none'?'selected':''}>Not yet decided</option></select></label>
+          ${isClosed?'':`<label class="filter-field"><span>${isReq?'Request status':'Status'}</span><select data-filter-key="state" onchange="setFilter('state',this.value);applyFilters()"><option value="">All</option>${stateOpts.map(s=>`<option value="${s}" ${filters.state===s?'selected':''}>${stlabel(s)}</option>`).join("")}</select></label>`}
+          ${isReq||isClosed?`<label class="filter-field"><span>Outcome</span><select data-filter-key="acc" onchange="setFilter('acc',this.value);applyFilters()"><option value="">All outcomes</option>${ACC_STATUS.map(s=>`<option ${filters.acc===s?'selected':''}>${s}</option>`).join("")}<option value="__none" ${filters.acc==='__none'?'selected':''}>Not yet decided</option></select></label>
           <label class="filter-field"><span>Duration</span><select data-filter-key="dur" onchange="setFilter('dur',this.value);applyFilters()"><option value="">All durations</option>${ACC_DURATION.map(d=>`<option ${filters.dur===d?'selected':''}>${d}</option>`).join("")}</select></label>`:""}
-          <label class="filter-field"><span>${isReq?'Case owner':'Handler'}</span><select data-filter-key="handler" onchange="setFilter('handler',this.value);applyFilters()"><option value="">All</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select></label>
+          <label class="filter-field"><span>${isReq?'Case owner':(isClosed?'Owner / handler':'Handler')}</span><select data-filter-key="handler" onchange="setFilter('handler',this.value);applyFilters()"><option value="">All</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select></label>
           <label class="filter-field"><span>Location state</span><select data-filter-key="us" onchange="setFilter('us',this.value);applyFilters()"><option value="">All states</option>${statesList.map(s=>`<option ${filters.us===s?'selected':''}>${s}</option>`).join("")}</select></label>
           <label class="filter-field filter-wide-mobile"><span>District leader</span><select id="flt-leader" data-filter-key="leader" onchange="setFilter('leader',this.value);applyFilters()"><option value="">All district leaders</option>${[...DISTRICT_LEADERS,"Other"].map(d=>`<option value="${esc(d)}" ${filters.leader===d?'selected':''}>${esc(districtLeaderLabel(d))}</option>`).join("")}</select></label>
           <label class="filter-field filter-wide-mobile"><span>Period</span><select id="flt-period" data-filter-key="period" onchange="setFilter('period',this.value);applyFilters()"><option value="">All periods</option>${Object.entries(FISCAL_PERIODS).map(([key,p])=>`<option value="${key}" ${filters.period===key?'selected':''}>${esc(p.label)}</option>`).join("")}</select></label>
         </div>
       </div>
     </div>
-    <div id="manualbox">${showManual&&!isReq?renderManual():""}</div>
+    <div id="manualbox">${showManual&&!isClosed?(draftKindOf(manual)==="request"?renderManualRequest():renderManual()):""}</div>
     <div class="card" style="padding:8px 0;overflow-x:auto"><table id="dashboard-table">
-      ${isReq
+      ${isClosed
+      ? `<thead><tr><th style="padding-left:20px">Ref</th><th>Type</th><th>Category</th><th>Opened</th><th>Location</th><th>Reporter / requester</th><th>Owner / handler</th><th>Closed</th><th>Closure</th></tr></thead>
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`
+      : isReq
       ? `<thead><tr><th style="padding-left:20px">Ref</th><th>Request type</th><th>Opened</th><th>Requester</th><th>Case owner</th><th>State</th><th>Outcome</th></tr></thead>
-      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,shown,now})}</tbody>`
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`
       : `<thead><tr><th style="padding-left:20px">Ref</th><th>Risk</th><th>Category</th><th>Opened</th><th>Location</th><th>Reporter</th><th>Involved</th><th>Handler</th><th>Status</th><th>Days open</th><th>SLA</th></tr></thead>
-      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,shown,now})}</tbody>`}
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`}
     </table></div>`;
 }
 // ---------------- WORKERS' COMP TRACKER (source spec, 8/21) -----------------
@@ -1400,10 +1425,11 @@ async function renderWcInto(el){
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
         <div class="dash-toggle">
-          <button onclick="setDashView('cases')">Cases</button>
-          <button onclick="setDashView('requests')">Requests</button>
-          <button class="on" onclick="setDashView('wc')">Workers' Comp</button>
-          <button onclick="setDashView('legal')">Legal &amp; Claims</button>
+          <button aria-pressed="false" onclick="setDashView('cases')">Cases</button>
+          <button aria-pressed="false" onclick="setDashView('requests')">Requests</button>
+          <button aria-pressed="false" onclick="setDashView('closed')">Closed</button>
+          <button class="on" aria-pressed="true" onclick="setDashView('wc')">Workers' Comp</button>
+          <button aria-pressed="false" onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
@@ -1650,10 +1676,11 @@ async function renderLegalInto(el){
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
         <div class="dash-toggle">
-          <button onclick="setDashView('cases')">Cases</button>
-          <button onclick="setDashView('requests')">Requests</button>
-          <button onclick="setDashView('wc')">Workers' Comp</button>
-          <button class="on" onclick="setDashView('legal')">Legal &amp; Claims</button>
+          <button aria-pressed="false" onclick="setDashView('cases')">Cases</button>
+          <button aria-pressed="false" onclick="setDashView('requests')">Requests</button>
+          <button aria-pressed="false" onclick="setDashView('closed')">Closed</button>
+          <button aria-pressed="false" onclick="setDashView('wc')">Workers' Comp</button>
+          <button class="on" aria-pressed="true" onclick="setDashView('legal')">Legal &amp; Claims</button>
         </div>
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
@@ -1702,7 +1729,6 @@ const legalDocumentKind = name => {
 function lgSummary(r){
   if (!r) return "";
   if (legalComposer.caseId !== r.id) legalComposer = {caseId:r.id,note:"",files:[],status:"",error:"",noteError:"",retry:false};
-  const due = r.due_date ? fmtDateOnly(r.due_date) : (r.due_date_note || "—");
   const docs = legalDetail.files.length ? legalDetail.files.map(f=>{
     const display = legalDocumentName(f.name);
     const kind = legalDocumentKind(display);
@@ -1722,7 +1748,8 @@ function lgSummary(r){
           <div class="kv"><span class="k">Complainant</span><b>${esc(r.complainant||'—')}</b></div>
           <div class="kv"><span class="k">Type</span><span>${esc(r.claim_type||'—')}</span></div>
           <div class="kv"><span class="k">Case state</span><span>${esc(r.case_state||'—')}</span></div>
-          <div class="kv"><span class="k">Due date</span><span class="${lgDue(r)?'pill due-over':''}">${esc(due)}</span></div>
+          <div class="kv"><span class="k">Due date</span><span class="${lgDue(r)?'pill due-over':''}">${r.due_date?esc(fmtDateOnly(r.due_date)):'—'}</span></div>
+          <div class="kv"><span class="k">Due date note</span><span>${esc(r.due_date_note||'—')}</span></div>
         </div>
         <div class="col">
           <div class="kv"><span class="k">Opposing side</span><span>${esc(r.opposing_counsel||'—')}</span></div>
@@ -2160,6 +2187,11 @@ let draftTimer = null;
 let draftPending = false;    // content changed since the last successful write
 let draftSaveFailed = false; // last write threw (quota/blocked storage) — surfaced in the form note
 function draftKey(){ return MANUAL_DRAFT_PREFIX + ((session?.user?.email)||"anon").toLowerCase(); }
+// The manual box holds either a case or a request (manual.kind). Each kind gets
+// its own per-tab slot so a half-typed request can never restore as a case (or
+// vice versa) — the two forms have different fields and different submit params.
+function draftKindOf(m){ return m && m.kind === "request" ? "request" : "case"; }
+function manualSlotId(){ return draftKindOf(manual) === "request" ? TAB_ID + ":request" : TAB_ID; }
 function manualDirty(){
   return !!(manual && ((manual.description||"").trim() || (manual.email||"").trim() || (manual.parties||[]).length));
 }
@@ -2181,7 +2213,7 @@ function writeDraftNow(force){
   if (!manualDirty()) return;           // never persist a pristine form (no phantom "restored draft")
   try {
     const s = readDraftStore();
-    s[TAB_ID] = { at: Date.now(), manual };
+    s[manualSlotId()] = { at: Date.now(), manual };
     sessionStorage.setItem(draftKey(), JSON.stringify(s));
     draftPending = false;
     if (draftSaveFailed){ draftSaveFailed = false; paintSaveNote(); }
@@ -2206,12 +2238,15 @@ function flushManualDraft(force){ clearTimeout(draftTimer); draftTimer = null; w
 // last input would otherwise miss the draft entirely.
 window.addEventListener("pagehide", ()=>flushManualDraft());
 document.addEventListener("visibilitychange", ()=>{ if (document.visibilityState === "hidden") flushManualDraft(); });
-function loadManualDraft(){
+function loadManualDraft(kind = "case"){
   const s = readDraftStore();
   let best = null, bestKey = null;
-  for (const k of Object.keys(s)) if (!best || (s[k].at||0) > (best.at||0)) { best = s[k]; bestKey = k; }
+  for (const k of Object.keys(s)){
+    if (draftKindOf(s[k].manual) !== kind) continue;
+    if (!best || (s[k].at||0) > (best.at||0)) { best = s[k]; bestKey = k; }
+  }
   if (!best) return null;
-  const m = Object.assign(blankIncident(true), best.manual, { manual:true });
+  const m = Object.assign(blankIncident(true), best.manual, { manual:true, kind });
   // Normalize restored types — a malformed stored draft must never break rendering.
   if (!Array.isArray(m.parties)) m.parties = [];
   if (!Array.isArray(m.pRoles) || !m.pRoles.length) m.pRoles = ["subject"];
@@ -2222,15 +2257,17 @@ function loadManualDraft(){
   // while the stale value silently submits — keep display and state in agreement.
   // ("Other / not store-specific" is a legal non-store value the select always offers.)
   if (m.location && m.location !== "Other / not store-specific" && !(storeList||[]).includes(m.location)) m.location = "";
-  if (!CATEGORIES.includes(m.category)) m.category = CATEGORIES[0];
+  // Requests store the request type in `category` — validate against the right list.
+  if (kind === "request"){ if (!REQUEST_TYPES.includes(m.category)) m.category = REQUEST_TYPES[0]; }
+  else if (!CATEGORIES.includes(m.category)) m.category = CATEGORIES[0];
   return { at: best.at, key: bestKey, manual: m };
 }
-function hasManualDraft(){ return loadManualDraft() !== null; }
+function hasManualDraft(kind = "case"){ return loadManualDraft(kind) !== null; }
 function clearManualDraft(){
   clearTimeout(draftTimer); draftTimer = null; manualDraftAt = null; draftPending = false;
   try {
     const s = readDraftStore();
-    delete s[TAB_ID];
+    delete s[manualSlotId()];
     sessionStorage.setItem(draftKey(), JSON.stringify(s));
   } catch {}
 }
@@ -2245,7 +2282,17 @@ function clearAllManualDrafts(){
     }
   } catch {}
 }
-function discardManualDraft(){ clearManualDraft(); manual = blankIncident(true); errorMsg = ""; renderManualBox(); }
+function discardManualDraft(){
+  const kind = draftKindOf(manual);           // clearManualDraft targets the slot for the CURRENT kind — read it first
+  clearManualDraft();
+  manual = manualBlank(kind); errorMsg = ""; renderManualBox();
+}
+// A blank manual-box state for the given kind (request stores its type in `category`).
+function manualBlank(kind){
+  const m = blankIncident(true);
+  if (kind === "request"){ m.kind = "request"; m.category = REQUEST_TYPES[0]; }
+  return m;
+}
 // Pull DOM-only values into state before any repaint (belt & braces — both
 // fields are also bound via oninput below).
 function syncManualFields(){
@@ -2258,24 +2305,25 @@ function renderManualBox(){
   const el = $("manualbox");
   if (!el) { render(); return; }
   syncManualFields();
-  el.innerHTML = showManual ? renderManual() : "";
+  el.innerHTML = showManual ? (draftKindOf(manual) === "request" ? renderManualRequest() : renderManual()) : "";
 }
 function toggleManual(){
   showManual = !showManual;
   errorMsg = "";   // never carry a stale error banner into a fresh/restored form
   if (showManual) {
+    const kind = dashView === "requests" ? "request" : "case";   // the box adds what the open tab lists
     clearTimeout(draftTimer); draftTimer = null;   // a pending save must not overwrite what we're about to restore
-    const d = loadManualDraft();
+    const d = loadManualDraft(kind);
     if (d) {
       manual = d.manual; manualDraftAt = d.at;
       // Claim the restored slot under THIS tab id immediately — an orphaned
       // slot would survive submit and re-offer the already-filed case as a
       // "draft" days later (duplicate-case risk found in QC).
       draftPending = false;
-      if (d.key !== TAB_ID) try {
+      if (d.key !== manualSlotId()) try {
         const s = readDraftStore();
         delete s[d.key];
-        s[TAB_ID] = { at: d.at, manual };
+        s[manualSlotId()] = { at: d.at, manual };
         sessionStorage.setItem(draftKey(), JSON.stringify(s));
       } catch {
         // Claim failed (storage broken) — the old slot survives; keep pending so
@@ -2283,7 +2331,7 @@ function toggleManual(){
         draftPending = true; draftSaveFailed = true;
       }
     }
-    else { manual = blankIncident(true); manualDraftAt = null; draftPending = false; }
+    else { manual = manualBlank(kind); manualDraftAt = null; draftPending = false; }
   } else {
     syncManualFields(); flushManualDraft(true);   // Cancel keeps the draft — saved synchronously (no 300ms race)
   }
@@ -2359,6 +2407,59 @@ async function submitManual(){
   if(error){ errorMsg = errText(error); renderManualBox(); return; }
   clearManualDraft(); showManual=false; manual=blankIncident(true);
   alert(`Case ${data.ref} added.`); render();
+}
+
+// ---- manual REQUEST entry (Vicky 9/14: parity with Cases / Workers' Comp) ----
+// Same `manual` state object and draft layer as the manual case form (kind:
+// "request"), and the SAME m-email / m-location / m-desc element ids so
+// syncManualFields() and paintSaveNote() cover both forms. No party builder or
+// incident date — mirrors the employee-facing request intake, which submits
+// p_parties:[] and p_incident_date:null.
+function renderManualRequest(){
+  return `<div class="card" style="border-color:var(--green)">
+    <h2 class="section" style="font-size:16px">Add a request manually <span class="chip">received outside the portal</span></h2>
+    ${manualDraftAt?`<div class="banner ok" style="margin:6px 0 10px">Restored your unsaved draft (from ${esc(new Date(manualDraftAt).toLocaleString())}). <a onclick="discardManualDraft()" style="cursor:pointer;font-weight:700;text-decoration:underline">Start fresh instead</a></div>`:""}
+    <label>Employee's email (if known)</label><input id="m-email" type="text" value="${esc(manual.email)}" oninput="setM('email',this.value,true)">
+    <label for="m-category">Request type</label>
+    <select id="m-category" onchange="setM('category',this.value)">${REQUEST_TYPES.map(t=>`<option ${manual.category===t?'selected':''}>${t}</option>`).join("")}</select>
+    <label for="m-location">Location (optional)</label>
+    ${locationPicker("m-location", manual.location, "setManualLocation", true)}
+    <label>Request (paste or describe it as received)</label>
+    <textarea id="m-desc" oninput="setM('description',this.value,true)">${esc(manual.description)}</textarea>
+    ${draftSaveFailed
+      ? `<p id="m-savenote" class="note-sm" style="margin-top:4px;color:var(--red);font-weight:600">Couldn't auto-save this draft in the browser (storage full or blocked) — keep this tab open until you submit.</p>`
+      : `<p id="m-savenote" class="note-sm" style="margin-top:4px">Draft auto-saves in this browser as you type and survives a refresh. It's cleared when anyone signs out on this computer.</p>`}
+    ${errorMsg?`<div class="banner err">${esc(errorMsg)}</div>`:""}
+    <div style="margin-top:14px"><button class="btn" onclick="submitManualRequest()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Adding…':'Add request'}</button></div>
+  </div>`;
+}
+async function submitManualRequest(){
+  const epoch = sessionEpoch;
+  manual.description = $("m-desc")?.value ?? manual.description;
+  manual.email = (($("m-email")?.value ?? manual.email)||"").trim();
+  manual.location = $("m-location")?.value ?? manual.location;
+  errorMsg="";
+  const chosenLocation = canonicalLocation(manual.location);
+  if(chosenLocation === null){ errorMsg=locationError(false); renderManualBox(); return; }
+  manual.location = chosenLocation; manual.usState = stateMap[chosenLocation] || "";
+  if(!manual.description.trim()){ errorMsg="Please paste or describe the request."; renderManualBox(); return; }
+  // Server only validates the email format on NON-manual submissions; a bad
+  // address here would queue confirmation emails that bounce in the outbox.
+  if(manual.email && !/^\S+@\S+\.\S+$/.test(manual.email)){ errorMsg = "The employee's email doesn't look valid — fix it or leave it blank."; renderManualBox(); return; }
+  busy=true; renderManualBox();
+  let data, error;
+  try {
+    ({ data, error } = await sb.rpc("submit_case_v2", {
+      p_intake_type:"request", p_category:manual.category, p_description:manual.description,
+      p_anonymous:false, p_location:manual.location||null, p_relationship:null, p_role:null,
+      p_contact_email:manual.email||null, p_contact_phone:null, p_parties:[], p_manual:true, p_incident_date:null,
+      p_us_state:manual.usState||null }));
+  } catch(e) { error = e; }
+  if(epoch !== sessionEpoch) return;
+  busy=false;
+  if(error){ errorMsg = errText(error); renderManualBox(); return; }
+  clearManualDraft(); showManual=false; manual=manualBlank("request");
+  alert(`Request ${data.ref} added.`); render();
 }
 
 // ---- case detail ----
@@ -2699,8 +2800,9 @@ async function renderCaseDetailInto(el, id){
     ${(events||[]).map(e=>`<li><div class="t">${fmt(e.at)} · ${esc(e.type)}</div><div class="e">${esc(e.note)}</div></li>`).join("")}
   </ul></div>
   <div class="card"><b>Messages ${c.anonymous?'<span class="chip">relayed — reporter stays anonymous</span>':''}</b>
+    ${c.manual_entry&&!c.anonymous&&!c.reporter_display?'<div class="banner warn" style="margin:8px 0">This was added manually with no reporter email on file — messages written here are saved to the case record but can\'t reach the employee. Contact them directly.</div>':''}
     ${messageThreadHtml(id,null,true)}
-    <p class="note-sm">Messages are also emailed to the reporter automatically${c.anonymous?" — without revealing their address to you":""}.</p>
+    ${c.manual_entry&&!c.anonymous&&!c.reporter_display?'':`<p class="note-sm">Messages are also emailed to the reporter automatically${c.anonymous?" — without revealing their address to you":""}.</p>`}
   </div>
   ${closeModal.open?renderCloseModal():""}`;
   if(medicalPanel.caseId!==id||medicalPanel.status==="idle") void loadMedicalPanel(id);
@@ -3134,7 +3236,18 @@ async function addNote(id){
 async function doAdvance(id,to){
   if(!(pendingAdvance && pendingAdvance.id===id && pendingAdvance.to===to)){ pendingAdvance={id,to}; render(); return; }
   pendingAdvance=null;
-  const {error}=await sb.rpc("advance_state",{p_case_id:id,p_to:to}); if(error)alert(errText(error)); render();
+  const epoch=sessionEpoch, userId=session?.user?.id;
+  const current = caseExport?.c?.id===id ? caseExport.c : dashboardData.find(c=>c.id===id);
+  const wasClosed = current?.state === "Closed";
+  const {error}=await sb.rpc("advance_state",{p_case_id:id,p_to:to});
+  if(epoch!==sessionEpoch || session?.user?.id!==userId || selected!==id) return;
+  if(error){ alert(errText(error)); render(); return; }
+  if(wasClosed && dashView==="closed"){
+    selected=null;
+    dashView=current?.intake_type==="request" ? "requests" : "cases";
+    filters=blankDashboardFilters();
+  }
+  render();
 }
 function cancelAdvance(){ pendingAdvance=null; render(); }
 async function sendHandlerMsg(id){ const v=$("hmsg")?.value.trim(); if(!v)return; const {error}=await sb.rpc("post_handler_message",{p_case_id:id,p_body:v}); if(error)alert(errText(error)); render(); }
