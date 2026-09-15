@@ -325,8 +325,11 @@
   .legal-detail-row>.card{margin-top:0}
   .legal-note-compose,.legal-upload{display:flex;align-items:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}
   .legal-note-compose textarea,.legal-upload input{flex:1;min-width:190px}
-  .legal-preview-modal{width:min(980px,calc(100vw - 32px));max-width:980px}
-  .legal-preview-canvas{display:grid;place-items:center;margin-top:16px;height:min(68vh,720px);overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
+  .modal.legal-preview-modal{width:100%;max-width:none;height:calc(100vh - 32px);height:calc(100dvh - 32px);max-height:none;display:flex;flex-direction:column;padding:20px;overflow:hidden}
+  .legal-preview-modal>.legal-section-head,.legal-preview-modal>.note-sm{flex:none}
+  .legal-preview-modal>.legal-section-head>div{flex:1;min-width:0;overflow-wrap:anywhere}
+  .legal-preview-modal>.note-sm{margin-bottom:0}
+  .legal-preview-canvas{display:grid;grid-template: minmax(0,1fr) / minmax(0,1fr);place-items:center;flex:1;min-height:0;min-width:0;margin-top:12px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fff}
   .legal-preview-canvas iframe{display:block;width:100%;height:100%;border:0}
   .legal-preview-canvas img{display:block;max-width:100%;max-height:100%;object-fit:contain}
   .legal-preview-canvas audio{width:min(640px,calc(100% - 24px))}
@@ -420,8 +423,8 @@
     .legal-note-compose>.btn,.legal-upload>.btn{width:100%}
     .legal-editor-head{flex-wrap:wrap}
     .legal-editor-head>b{flex:1 0 100%;overflow-wrap:normal;word-break:normal}
-    .legal-preview-modal{padding:16px}
-    .legal-preview-canvas{height:62vh}
+    .modal-overlay.legal-preview-overlay{padding:8px}
+    .modal.legal-preview-modal{height:calc(100vh - 16px);height:calc(100dvh - 16px);padding:12px}
     .login-card{margin:8px auto;padding:24px 20px}
     .login-actions .btn{flex:1 1 145px}
     .mobile-form-actions .btn{flex:1}
