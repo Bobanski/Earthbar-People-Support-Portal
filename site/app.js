@@ -1954,6 +1954,11 @@ async function lgPreviewDocument(caseId, storedName, displayName){
   const { data, error } = await sb.storage.from("evidence").createSignedUrl(path,120);
   if (!ctx.visible() || generation!==legalPreviewGeneration) return;
   if (error || !data?.signedUrl){ alert("Could not create a private preview link: " + (error?.message||"unknown error")); return; }
+  if (kind === "frame"){
+    try { await verifyFrameContentType(data.signedUrl, String(displayName||storedName).split(".").pop().toLowerCase()); }
+    catch { if(ctx.visible() && generation===legalPreviewGeneration) alert("This file could not be verified for safe preview. Download the original instead."); return; }
+    if (!ctx.visible() || generation!==legalPreviewGeneration) return;
+  }
   legalPreview = {open:true,caseId,storedName,name:displayName||legalDocumentName(storedName),url:data.signedUrl,kind};
   render();
 }
@@ -1983,15 +1988,28 @@ function lgPreviewModal(){
       <div class="legal-section-head"><div><div class="mini-l">Document preview</div><b>${esc(legalPreview.name)}</b></div><span style="display:flex;gap:6px"><button id="lg-preview-download" class="btn sm ghost" data-p="${esc(legalPreview.storedName)}" data-n="${esc(legalPreview.name)}" onclick="lgDownloadDocument('${esc(legalPreview.caseId)}',this.dataset.p,this.dataset.n)">Download</button><button id="lg-preview-close" class="btn sm ghost" autofocus onclick="lgClosePreview()">Close</button></span></div>
       <div class="legal-preview-canvas">${legalPreview.kind==="image"
         ? `<img src="${esc(legalPreview.url)}" alt="Preview of ${esc(legalPreview.name)}" referrerpolicy="no-referrer">`
-        : `<iframe src="${esc(legalPreview.url)}" title="Preview of ${esc(legalPreview.name)}" sandbox referrerpolicy="no-referrer" tabindex="-1"></iframe>`}</div>
+        : `<iframe src="${esc(legalPreview.url)}" title="Preview of ${esc(legalPreview.name)}" referrerpolicy="no-referrer" tabindex="-1"></iframe>`}</div>
       <p class="note-sm">Private preview links expire after two minutes.</p>
     </div></div>`;
 }
 
 // ---- private file preview shared by case, email, and message attachments ----
 // HTML, SVG, and Office files intentionally stay download-only. Text is fetched
-// and escaped into <pre>; PDFs run in a sandboxed frame; common raster formats
-// render as images. Every caller must authorize the exact file for its surface.
+// and escaped into <pre>; PDFs load in a cross-origin frame WITHOUT the sandbox
+// attribute — Chromium refuses to run its PDF viewer in a sandboxed frame under
+// any token combination, so isolation relies on the storage host being a
+// different origin than the app. Common raster formats render as images.
+// Every caller must authorize the exact file for its surface.
+// Check the served type, not uploader metadata or the filename alone. Objects
+// are immutable to uploaders; redirects must not change the verified origin.
+async function verifyFrameContentType(url,extension="pdf"){
+  const target=new URL(url), origin=new URL(cfg.SUPABASE_URL).origin;
+  const allowed={pdf:["application/pdf"],txt:["text/plain"],csv:["text/csv","text/plain"]}[extension]||[];
+  if(target.protocol!=="https:" || target.origin!==origin || target.username || target.password || !allowed.length) throw new Error("Unsafe preview URL");
+  const response=await fetch(target.href,{method:"HEAD",credentials:"omit",referrerPolicy:"no-referrer",redirect:"error",cache:"no-store"});
+  const type=(response.headers.get("content-type")||"").split(";")[0].trim().toLowerCase();
+  if(!response.ok || !allowed.includes(type)) throw new Error("Unsafe preview content type");
+}
 function attachmentKind(name,type=""){
   const ext=String(name||"").split(".").pop().toLowerCase();
   if(["png","jpg","jpeg","gif","webp"].includes(ext) && /^image\/(png|jpeg|gif|webp)$/i.test(type||`image/${ext==='jpg'?'jpeg':ext}`)) return "image";
@@ -2004,11 +2022,9 @@ function attachmentKind(name,type=""){
 function attachmentPreviewHtml(){
   const p=attachmentPreview;
   const body=p.kind==="image"?`<img src="${esc(p.url)}" alt="Preview of ${esc(p.name)}" referrerpolicy="no-referrer">`
-    :p.kind==="pdf"?`<iframe src="${esc(p.url)}" title="Preview of ${esc(p.name)}" sandbox referrerpolicy="no-referrer" tabindex="-1"></iframe>`
+    :p.kind==="pdf"?`<iframe src="${esc(p.url)}" title="Preview of ${esc(p.name)}" referrerpolicy="no-referrer" tabindex="-1"></iframe>`
     :p.kind==="audio"?`<audio src="${esc(p.url)}" controls preload="metadata" aria-label="Preview of ${esc(p.name)}"></audio>`
     :p.kind==="video"?`<video src="${esc(p.url)}" controls preload="metadata" playsinline aria-label="Preview of ${esc(p.name)}"></video>`
-    :p.kind==="audio"?`<audio src="${esc(p.url)}" controls preload="metadata"></audio>`
-    :p.kind==="video"?`<video src="${esc(p.url)}" controls preload="metadata" playsinline></video>`
     :`<pre class="attachment-text-preview">${esc(p.text)}</pre>`;
   return `<div id="attachment-preview" class="modal-overlay legal-preview-overlay" role="presentation" onclick="if(event.target===this)closeAttachmentPreview()">
     <div class="modal legal-preview-modal" role="dialog" aria-modal="true" aria-label="Preview ${esc(p.name)}">
@@ -2029,6 +2045,11 @@ async function openAttachmentPreview({name,type="",kindOverride="",authorize,dow
   try { authorized=await authorize(); } catch(error){ authorized={error}; }
   if(epoch!==sessionEpoch || generation!==attachmentPreviewGeneration || !isCurrent()) return;
   if(!authorized?.url){ alert("Could not create a private preview link: "+(authorized?.error?.message||authorized?.error||"unknown error")); return; }
+  if(kind==="pdf"){
+    try { await verifyFrameContentType(authorized.url); }
+    catch { if(epoch===sessionEpoch && generation===attachmentPreviewGeneration && isCurrent()) alert("This file could not be verified for safe preview. Download the original instead."); return; }
+    if(epoch!==sessionEpoch || generation!==attachmentPreviewGeneration || !isCurrent()) return;
+  }
   let text="";
   if(kind==="text"){
     try {
