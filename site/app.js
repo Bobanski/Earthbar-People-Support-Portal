@@ -281,7 +281,7 @@ const CATEGORIES = ["Manager conduct","Coworker conduct","Harassment","Discrimin
 const RELATIONSHIPS = ["Employee","Former employee","Customer","Vendor / partner","Other"];
 const REQUEST_TYPES = ["Accommodation — Religious","Accommodation — Medical","Accommodation — Other","Other request"];
 const RISKS = ["Low","Medium","High"];
-const CASE_DETAIL_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
+const CASE_DETAIL_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref,requester_id";
 // 8/18 sync call: "Subject" is displayed as "Implicated Person"; Witness is
 // split into firsthand / secondhand; "Reporter" added (someone reporting on
 // behalf of others). Stored values are kept stable for data continuity —
@@ -305,7 +305,7 @@ const ALLEGATION_TYPES = ["Harassment","Discrimination","Retaliation","Bullying 
   "Safety violation","Wage & hour / timekeeping","Attendance / leave","Theft / dishonesty","Confidentiality breach",
   "Fraternization","Substance policy","Code of conduct — other"];
 const POLICY_LIST = ["Equal Employment Opportunity","Anti-Harassment Policy","Gossip, Bullying, Abusive Conduct or Communications",
-  "Complaint Procedure","Reasonable Accommodations","Fraternization","Meal Period and Rest Break Policy","Attendance",
+  "Code of Conduct","Complaint Procedure","Reasonable Accommodations","Fraternization","Meal Period and Rest Break Policy","Attendance",
   "Confidential Information","Workplace safety","Work Schedules","Other (see notes)"];
 const CORRECTIVE_TYPES = ["Coaching / counseling","Verbal warning","Written warning","Final warning","Suspension",
   "Termination","Training required","Schedule / transfer change","Policy change","Other"];
@@ -333,7 +333,7 @@ const WC_ASSIGNEES = ["People Team","Claims Lead","Legal"];
 // selectable (opt() pattern) and the DB (migration 018) doesn't check them,
 // except risk_level and case_state which are fixed sets.
 const LEGAL_STATES = ["Active","Completed"];
-const LEGAL_STATUSES = ["Received","Documentation Sent","Negotiating","Litigation"];
+const LEGAL_STATUSES = ["Received","Documentation Sent","Negotiating","Litigation","Settlement Reached"];   // Settlement Reached added T137 (9/15 Ops/People meeting)
 const LEGAL_TYPES = ["Lawsuit","Demand Letter","PAGA","Jurisdictional Audit","Administrative Claim"];
 const LEGAL_COUNSEL = ["Alexis Law Firm","Fisher Philips","Karlan","Littler","Earthbar Team","NA"];
 const LEGAL_EB_POINTS = ["Legal","People Team","Operations"];
@@ -357,15 +357,30 @@ const SLABEL = { UnderReview:"Under Review", OnHold:"On Hold",
   AwaitingInformation:"Awaiting Information", InInteractiveProcess:"In Interactive Process",
   DecisionPending:"Decision Pending", ActionMonitoring:"Action / Monitoring" };
 const stlabel = s => SLABEL[s] || s;
+// T135 (9/15): the period list only reached P7, so nothing opened after Jul 12
+// could ever match a period — extended through P13 using the same 4-week
+// arithmetic as the P5–P7 anchors. All 13 date ranges verified against the
+// canonical KPI Scorecard Calendar tab on 2026-09-15 (exact match — do not edit).
 const FISCAL_PERIODS = {
+  P1:{ from:"2025-12-29", to:"2026-01-25", label:"P1 · Dec 29–Jan 25" },
+  P2:{ from:"2026-01-26", to:"2026-02-22", label:"P2 · Jan 26–Feb 22" },
+  P3:{ from:"2026-02-23", to:"2026-03-22", label:"P3 · Feb 23–Mar 22" },
+  P4:{ from:"2026-03-23", to:"2026-04-19", label:"P4 · Mar 23–Apr 19" },
   P5:{ from:"2026-04-20", to:"2026-05-17", label:"P5 · Apr 20–May 17" },
   P6:{ from:"2026-05-18", to:"2026-06-14", label:"P6 · May 18–Jun 14" },
   P7:{ from:"2026-06-15", to:"2026-07-12", label:"P7 · Jun 15–Jul 12" },
+  P8:{ from:"2026-07-13", to:"2026-08-09", label:"P8 · Jul 13–Aug 9" },
+  P9:{ from:"2026-08-10", to:"2026-09-06", label:"P9 · Aug 10–Sep 6" },
+  P10:{ from:"2026-09-07", to:"2026-10-04", label:"P10 · Sep 7–Oct 4" },
+  P11:{ from:"2026-10-05", to:"2026-11-01", label:"P11 · Oct 5–Nov 1" },
+  P12:{ from:"2026-11-02", to:"2026-11-29", label:"P12 · Nov 2–Nov 29" },
+  P13:{ from:"2026-11-30", to:"2026-12-27", label:"P13 · Nov 30–Dec 27" },
 };
+const CUSTOM_PERIOD = "__custom";
 
 // ---- state ----
 let session = null, me = null, isHandler = false, isAdmin = false, signedOutReason = "", trustedDeviceNotice = "";
-let dirList = [], dirMap = {}, storeList = [], stateMap = {}, statesList = [];
+let dirList = [], dirMap = {}, storeList = [], stateMap = {}, statesList = [], dirLoaded = false;
 let view = "home", selected = null, busy = false, errorMsg = "";
 let auth = { email:"", sent:false, err:"", remember:false };
 let form = blankIncident();
@@ -373,7 +388,7 @@ let qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
 let dashView = "cases";
 let receipt = null, statusResult = null, myReports = [], myReportsError = "", myReportsLoading = true, myReportsLoaded = false;
 let myReportsPromise = null;
-const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", period:"", acc:"", dur:"", us:"", leader:"", quick:"", mine:"" });
+const blankDashboardFilters = () => ({ q:"", risk:"", cat:"", state:"", handler:"", period:"", pfrom:"", pto:"", acc:"", dur:"", us:"", loc:"", leader:"", quick:"", mine:"" });
 let filters = blankDashboardFilters();
 let dashboardData = [];
 // 8/18 call: state changes need a second "save" click before anything is
@@ -389,8 +404,12 @@ let lgSelected = null;      // null = list; "new" = create form; else legal_case
 let lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" };   // Active by default (spec)
 let legalData = [];
 let lgEditing = false;
-let legalDetail = { notes:[], files:[], errors:[] };
+let legalDetail = { notes:[], files:[], links:[], linkedCases:{}, linkedFiles:{}, errors:[] };
 let legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false };
+// T137 linked-cases picker. Query is bound to state with a silent oninput so a
+// full render() never loses typed text; results paint into their own container.
+let legalLinkPicker = { caseId:null, query:"", results:[], linked:[], busy:false, err:"", seq:0 };
+let legalLinkTimer = null;
 let legalBusy = { note:false, upload:false };
 let legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" };
 let legalPreviewGeneration = 0;
@@ -460,13 +479,14 @@ function resetSessionState(preserveMedicalInvite=false){
   clearTimeout(draftTimer); draftTimer = null;
   me = null; isHandler = false; isAdmin = false; trustedDeviceNotice = "";
   auth = { email:"", sent:false, err:"", remember:false };
-  dirList = []; dirMap = {}; storeList = []; stateMap = {}; statesList = []; hrTeam = [];
+  dirList = []; dirMap = {}; storeList = []; stateMap = {}; statesList = []; hrTeam = []; dirLoaded = false;
   view = "home"; selected = null; busy = false; errorMsg = "";
   form = blankIncident();
   qform = { location:"", body:"", email:"", rtype:REQUEST_TYPES[0] };
   dashView = "cases"; receipt = null; statusResult = null;
   myReports = []; myReportsError = ""; myReportsLoading = true; myReportsLoaded = false; myReportsPromise = null;
-  filters = blankDashboardFilters(); dashboardData = [];
+  filters = blankDashboardFilters(); dashboardData = []; dashSort = { key:"", dir:1 };
+  for (const key of Object.keys(employeeLookups)) employeeLookups[key].query = "";
   pendingAdvance = null; showFilters = false; showGuide = false; showReassign = false;
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
   wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = [];
@@ -477,6 +497,7 @@ function resetSessionState(preserveMedicalInvite=false){
   messageThread = blankMessageThread(); messageThreadGeneration += 1;
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
+  cdRequester = { caseId:null, err:"", busy:false };
   caseExportInProgress = false; caseExportGeneration += 1;
   lookup = { query:"", picked:null, result:null, err:"" };
   evidence = { list:[], err:"" }; evidenceRetry = { caseId:null, files:[] };
@@ -496,7 +517,8 @@ function blankIncident(isManual = false){
   return { anonymous:false, location:"", usState:"", relationship:"Employee", role:"",
     category:CATEGORIES[0], parties:[], pQuery:"", pType:"employee", pName:"",
     pRoles:["subject"], description:"", email:"", phone:"", files:[], manual:isManual,
-    incidentDate: todayStr(), kind:"case" };
+    incidentDate: todayStr(), kind:"case", requesterId:"", requesterName:"",
+    requesterAutoEmail:"", requesterAutoLocation:"" };
 }
 const OTHER_LOCATION = "Other / not store-specific";
 const REFERENCE_STATE_MAP = Object.fromEntries(STORE_LOCATIONS.map(location => [location.name, location.state]));
@@ -540,9 +562,15 @@ const caseDistrictLeader = c => storeOrg(c.location)?.districtLeader || "Other";
 // source value for matching while showing the name Operations uses day to day.
 const districtLeaderLabel = value => value === "Latoya Martin" ? "Monique (Latoya Martin)" : value;
 const caseOpenedInPeriod = (c, key) => {
+  const opened = new Date(c.created_at).getTime();
+  if (key === CUSTOM_PERIOD) {   // T135: custom date range (either bound optional)
+    if (!filters.pfrom && !filters.pto) return true;
+    const from = filters.pfrom ? new Date(filters.pfrom + "T00:00:00").getTime() : -Infinity;
+    const to = filters.pto ? new Date(filters.pto + "T23:59:59.999").getTime() : Infinity;
+    return opened >= from && opened <= to;
+  }
   const p = FISCAL_PERIODS[key];
   if (!p) return true;
-  const opened = new Date(c.created_at).getTime();
   return opened >= new Date(p.from + "T00:00:00").getTime()
     && opened <= new Date(p.to + "T23:59:59.999").getTime();
 };
@@ -563,6 +591,69 @@ const linkify = s => esc(s).replace(/\bhttps?:\/\/[^\s<]+/g,
 const errText = e => /function|does not exist|not exist|PGRST202|schema cache/i.test(e?.message||"")
   ? "This action needs the v2 backend, which isn't deployed yet." : (e?.message || "Unknown error");
 
+// ---------------- shared employee lookup (T136) ----------------
+// Two tiers of sharing. The MATCHER (employeeMatches) is shared by every
+// directory search: this component, the case party builder, the party
+// editor, and the Employee mention lookup view. The COMPONENT
+// (registerEmployeeLookup + employeeLookupHtml) is used only where a single
+// person is picked: the manual-request requester, the legal editor
+// complainant, the medical return-request recipient, and the case-detail
+// set-requester control — the party surfaces keep their own multi-select
+// UI and share just the matcher.
+// Accent-insensitive, so "Jose" finds "José". Results show
+// "Name (EID)"; EID = directory.employee_id, location = directory.store.
+// Each instance repaints ONLY its own container — a full render() mid-form
+// wipes typed input (bug 9/1), so hosts pass repaint callbacks instead.
+const normSearch = s => { try { return String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase(); } catch { return String(s ?? "").toLowerCase(); } };
+function employeeMatches(query, limit = 8){
+  const q = normSearch(String(query || "").trim());
+  if (q.length < 2) return [];
+  return dirList.filter(d => normSearch(d.name).includes(q)
+    || normSearch(d.title).includes(q)
+    || normSearch(d.employee_id).startsWith(q)).slice(0, limit);
+}
+const employeeLookups = {};   // instance id -> { query, placeholder, getSelected, onPick, onClear }
+// Hosts re-register on every render so callbacks close over current state;
+// the typed query survives the re-registration.
+function registerEmployeeLookup(id, opts){
+  employeeLookups[id] = Object.assign({ query:"" }, employeeLookups[id], opts);
+  return id;
+}
+function employeeLookupHtml(id){
+  const inst = employeeLookups[id];
+  if (!inst) return "";
+  const sel = inst.getSelected?.();
+  if (sel){
+    const d = dirMap[sel.id];
+    const label = `${d?.name || sel.name || sel.id} (${sel.id})`;
+    return `<div id="el-${id}" class="emp-lookup"><span class="chip">${esc(label)}${d?.store?` · <i>${esc(d.store)}</i>`:""} <a onclick="elClear('${id}')" style="cursor:pointer;color:var(--red);font-weight:700" aria-label="Clear selected employee">×</a></span></div>`;
+  }
+  const results = employeeMatches(inst.query);
+  return `<div id="el-${id}" class="emp-lookup">
+    <input id="el-in-${id}" type="text" placeholder="${esc(inst.placeholder || "Search name, title, or employee ID…")}" value="${esc(inst.query)}" autocomplete="off" oninput="elInput('${id}',this.value)">
+    ${inst.query.trim().length >= 2 && !results.length ? `<p class="note-sm" style="margin-top:6px">${dirLoaded ? "No matching employee in the directory." : "Loading directory…"}</p>` : ""}
+    ${results.map(d=>`<div class="subj-result" data-el-instance="${esc(id)}" data-employee-id="${esc(d.employee_id)}" onclick="elPickResult(this)">${esc(d.name)} <span class="muted">(${esc(d.employee_id)})</span> — <span class="muted">${esc(d.title||'')}${d.store?' · '+esc(d.store):''}</span></div>`).join("")}
+  </div>`;
+}
+function elRepaint(id){ const el = $(`el-${id}`); if (el) el.outerHTML = employeeLookupHtml(id); }
+function elInput(id, v){
+  const inst = employeeLookups[id]; if (!inst) return;
+  inst.query = v; elRepaint(id);
+  const input = $(`el-in-${id}`); if (input){ input.focus(); input.setSelectionRange(v.length, v.length); }
+}
+function elPickResult(el){
+  const id = el?.dataset?.elInstance || "", empId = el?.dataset?.employeeId || "";
+  const inst = employeeLookups[id];
+  if (!inst || !empId || !dirMap[empId]) return;
+  inst.query = "";
+  inst.onPick?.(dirMap[empId]);
+}
+function elClear(id){
+  const inst = employeeLookups[id]; if (!inst) return;
+  inst.query = "";
+  if (inst.onClear) inst.onClear(); else elRepaint(id);
+}
+
 Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setRememberDevice,
   setF, setIncidentLocation, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
@@ -571,12 +662,15 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
   syncInterviewDraft, addInterviewPair, removeInterviewPair, moveInterviewPair, downloadBlankStatement, downloadFilledStatement,
+  logInterviewContactAttempt, removeInterviewContactAttempt, exportInterviewPdf, setPeriodFilter,
   toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
-  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
+  setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, setDashSort, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
+  elInput, elPickResult, elClear,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
+  lgLinkSearchInput, lgLinkCase, lgUnlinkCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip, assertCaseZipBudget,
   saveRisk, savePolicies, uploadCaseEvidence,
@@ -674,6 +768,7 @@ async function loadContext(){
   isAdmin = nextIsAdmin; isHandler = nextIsHandler;
   dirList = dir;
   dirMap = Object.fromEntries(dirList.map(d => [d.employee_id, d]));
+  dirLoaded = nextIsHandler;   // handlers now have the directory; lookups can say "no match" honestly
   const databaseStateMap = Object.fromEntries((ss||[])
     .filter(row => row.store && row.us_state)
     .map(row => [row.store, row.us_state]));
@@ -850,9 +945,7 @@ function partyBuilder(f, pre){
                 : {input:"onPartyInput",pick:"pickPartyEmp",add:"addParty",rm:"rmParty",set:"setF",role:"toggleRole"};
   const directoryAllowed = !!pre || canUseDirectorySearch();
   const results = f.pType==="employee" && directoryAllowed && f.pQuery.trim().length >= (isHandler ? 2 : 4)
-    ? (isHandler ? dirList.filter(d =>
-        (d.name||"").toLowerCase().includes(f.pQuery.toLowerCase()) ||
-        (d.title||"").toLowerCase().includes(f.pQuery.toLowerCase())).slice(0,8)
+    ? (isHandler ? employeeMatches(f.pQuery)   // shared accent-insensitive lookup (T136)
       : partySearchResults)
     : [];
   return `
@@ -1039,7 +1132,9 @@ function renderReceipt(r){
 // ---------------- DASHBOARD ----------------
 function setFilter(k,v){ filters[k]=v; }
 function activeDashboardFilterCount(){
-  return Object.entries(filters).filter(([key,value]) => key === "q" ? String(value).trim() : value).length;
+  // pfrom/pto ride along with the custom period selection — not separate filters
+  return Object.entries(filters).filter(([key,value]) =>
+    !["pfrom","pto"].includes(key) && (key === "q" ? String(value).trim() : value)).length;
 }
 function filterButtonText(){
   const n = activeDashboardFilterCount();
@@ -1049,6 +1144,19 @@ function syncDashboardFilterInputs(){
   const panel = $("dashboard-filters");
   if (!panel) return;
   panel.querySelectorAll("[data-filter-key]").forEach(input => { input.value = filters[input.dataset.filterKey] || ""; });
+  const range = $("flt-period-range");
+  if (range) range.hidden = filters.period !== CUSTOM_PERIOD;
+}
+// T135 QC: from > to in the custom range silently matches nothing — surface it
+// inline (scoped repaint via updateDashboardResults; inputs are never re-rendered
+// mid-typing). ISO yyyy-mm-dd strings compare correctly as plain strings.
+const customRangeInverted = () =>
+  filters.period === CUSTOM_PERIOD && !!filters.pfrom && !!filters.pto && filters.pfrom > filters.pto;
+function setPeriodFilter(value){
+  filters.period = value;
+  if (value !== CUSTOM_PERIOD){ filters.pfrom = ""; filters.pto = ""; }
+  syncDashboardFilterInputs();
+  applyFilters();
 }
 function toggleFilters(){
   showFilters = !showFilters;
@@ -1068,6 +1176,7 @@ function clearDashboardFilters(){
 function clearDashboardFilter(key){
   if (!Object.prototype.hasOwnProperty.call(filters,key)) return;
   filters[key] = "";
+  if (key === "period"){ filters.pfrom = ""; filters.pto = ""; }
   syncDashboardFilterInputs();
   updateDashboardResults();
 }
@@ -1083,12 +1192,12 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
 // Module-level: also the raw column list for the CSV export.
-const DASH_CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref";
+const DASH_CASE_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref,requester_id";
 const dashboardOverdue = (c, now=Date.now()) => (c.tasks||[]).some(t => t.status==="open" && t.due_at && new Date(t.due_at).getTime() < now);
 // This is a view of already-authorized rows, never an authorization substitute.
 // Fail closed when the signed-in email has no unique directory employee match.
@@ -1114,6 +1223,45 @@ const dashboardInvolved = c => (c.case_parties||[]).map(p =>
   p.party_type==="customer" || (!p.subject_id && p.display_name) ? `${p.display_name||"Customer"} (customer)` : nameOf(p.subject_id)
 ).filter(Boolean).join(", ");
 const dashboardLocState = c => c.location ? `${esc(c.location)}${c.us_state?`, ${esc(c.us_state)}`:""}` : (c.us_state?esc(c.us_state):"—");
+// T136: who a request is for. Live directory rows show "Name (EID)"; if the
+// employee later leaves the directory the recorded name (reporter_display)
+// still renders. Returns plain text — callers esc().
+const requesterLine = c => {
+  if (c.requester_id){
+    const d = dirMap[c.requester_id];
+    if (d) return `${d.name} (${d.employee_id})`;
+  }
+  return c.reporter_display || "";
+};
+// T136: column sorting shared by the cases / requests / closed tabs. Value
+// extractors return a number or a string; strings compare accent-insensitively
+// (so "José" files under J). Extractors run only while a sort is active.
+let dashSort = { key:"", dir:1 };
+const DASH_SORT_VALS = {
+  ref: c => c.ref || "",
+  risk: c => ({High:0,Medium:1,Low:2}[caseRisk(c)] ?? 3),
+  cat: c => c.category || "",
+  opened: c => Date.parse(c.created_at) || 0,
+  loc: c => (c.location || "") + (c.us_state ? ", " + c.us_state : ""),
+  reporter: c => c.anonymous ? "anonymous" : (requesterLine(c) || ""),
+  involved: c => dashboardInvolved(c),
+  handler: c => c.external ? "external advisor" : nameOf(c.handler_id),
+  state: c => stlabel(c.state) || "",
+  days: c => (c.closed_at ? new Date(c.closed_at).getTime() : Date.now()) - new Date(c.created_at).getTime(),
+  sla: c => Number(dashboardOverdue(c)),
+  outcome: c => c.accommodation_status || "",
+  type: c => c.intake_type === "request" ? "Request" : "Incident",
+  closed: c => c.closed_at ? (Date.parse(c.closed_at) || 0) : 0,
+  closure: c => c.closure_category || "",
+};
+function dashCompare(a, b){
+  const value = DASH_SORT_VALS[dashSort.key];
+  const va = value(a), vb = value(b);
+  const cmp = (typeof va === "number" && typeof vb === "number")
+    ? va - vb
+    : String(va).localeCompare(String(vb), undefined, { sensitivity:"base" });
+  return (cmp || String(a.ref || a.id).localeCompare(String(b.ref || b.id))) * dashSort.dir;
+}
 function dashboardModel(){
   const isReq = dashView === "requests";
   const isClosed = dashView === "closed";
@@ -1136,11 +1284,14 @@ function dashboardModel(){
     (!(isReq || isClosed) || !filters.acc || (c.intake_type==="request" && (filters.acc==="__none" ? !c.accommodation_status : c.accommodation_status===filters.acc))) &&
     (!(isReq || isClosed) || !filters.dur || (c.intake_type==="request" && c.accommodation_duration===filters.dur)) &&
     (!filters.us || c.us_state===filters.us) &&
+    (!filters.loc || c.location===filters.loc) &&
     (!filters.leader || caseDistrictLeader(c)===filters.leader) &&
     caseOpenedInPeriod(c, filters.period) &&
-    (!q || [c.ref,c.description,c.location,dashboardInvolved(c)].some(v => (v||"").toLowerCase().includes(q)))
+    (!q || [c.ref,c.description,c.location,dashboardInvolved(c),requesterLine(c)].some(v => (v||"").toLowerCase().includes(q)))
   );
   if (filters.mine) shown.sort((a,b) => compareMyWork(a,b,now));
+  // An explicit column sort overrides the My Work urgency order until cleared.
+  if (dashSort.key && DASH_SORT_VALS[dashSort.key]) shown.sort(dashCompare);
   return { isReq, isClosed, pool, shown, now };
 }
 function dashboardFilterChipEntries(){
@@ -1156,16 +1307,18 @@ function dashboardFilterChipEntries(){
   const labels = {
     risk:"Risk", cat:isReq?"Request type":"Category", state:isReq?"Request status":"Status",
     handler:isReq?"Case owner":(isClosed?"Owner / handler":"Handler"), acc:"Outcome", dur:"Duration", us:"Location state",
-    leader:"District leader", period:"Period"
+    loc:"Location", leader:"District leader", period:"Period"
   };
-  for (const key of ["risk","cat","state","handler","acc","dur","us","leader","period"]){
+  for (const key of ["risk","cat","state","handler","acc","dur","us","loc","leader","period"]){
     if (!filters[key]) continue;
     let value = filters[key];
     if (key === "handler") value = value === "__ext" ? "External advisor" : nameOf(value);
     if (key === "acc" && value === "__none") value = "Not yet decided";
     if (key === "state") value = stlabel(value);
     if (key === "leader") value = districtLeaderLabel(value);
-    if (key === "period") value = FISCAL_PERIODS[value]?.label || value;
+    if (key === "period") value = value === CUSTOM_PERIOD
+      ? `Custom ${filters.pfrom || "…"} → ${filters.pto || "…"}`
+      : (FISCAL_PERIODS[value]?.label || value);
     entries.push({ key, label:`${labels[key]}: ${value}` });
   }
   return entries;
@@ -1183,35 +1336,63 @@ function dashboardRowsHtml({isReq,isClosed,shown,now}){
     return `<tr class="clk" onclick="openCase('${c.id}')">
       <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open closed ${request?'request':'case'} ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td>
       <td><span class="chip">${request?'Request':'Incident'}</span></td><td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${dashboardLocState(c)}</td>
-      <td>${esc(c.anonymous?'Anonymous':(c.reporter_display||'—'))}</td><td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
+      <td>${c.anonymous?'Anonymous':esc(requesterLine(c)||'—')}</td><td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
       <td>${c.closed_at?fmtD(c.closed_at):'—'}</td><td>${closureLine(c)||'<span class="muted">—</span>'}</td>
     </tr>`;
   }).join("") : `<tr><td colspan="9" class="empty-row">No closed cases or requests match these filters.</td></tr>`;
   if (isReq) return shown.length ? shown.map(c=>`<tr class="clk" onclick="openCase('${c.id}')">
     <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open request ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td>
-    <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${esc(c.reporter_display||'—')}</td>
+    <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${dashboardLocState(c)}</td><td>${esc(requesterLine(c)||'—')}</td>
     <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
     <td>${pill(c.state)}${closureLine(c)}</td><td>${accPill(c.accommodation_status)}</td>
-  </tr>`).join("") : `<tr><td colspan="7" class="empty-row">No requests match these filters.</td></tr>`;
+  </tr>`).join("") : `<tr><td colspan="8" class="empty-row">No requests match these filters.</td></tr>`;
   return shown.length ? shown.map(c=>`<tr class="clk ${dashboardOverdue(c,now)?'overdue':''}" onclick="openCase('${c.id}')">
     <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open case ${esc(c.ref)}" onclick="event.stopPropagation();openCase('${c.id}')">${esc(c.ref)}</button></td><td>${riskPill(caseRisk(c))}</td>
     <td>${esc(c.category)}</td><td>${fmtD(c.created_at)}</td><td>${dashboardLocState(c)}</td>
-    <td>${c.anonymous?'<span class="chip">Anonymous</span>':esc(c.reporter_display||'Named')}</td><td>${esc(dashboardInvolved(c))||'—'}</td>
+    <td>${c.anonymous?'<span class="chip">Anonymous</span>':esc(requesterLine(c)||'Named')}</td><td>${esc(dashboardInvolved(c))||'—'}</td>
     <td>${c.external?'External advisor <span class="warnbadge">EXT</span>':esc(nameOf(c.handler_id))}</td>
     <td>${pill(c.state)}${closureLine(c)}</td><td>${daysOpen(c,now)}</td>
     <td>${dashboardOverdue(c,now)?'<span class="pill due-over">Overdue</span>':'<span class="pill due-ok">On track</span>'}</td>
   </tr>`).join("") : `<tr><td colspan="11" class="empty-row">No cases match these filters.</td></tr>`;
 }
+// T136: the three dashboard tabs share one sortable header model — the
+// requests tab mirrors the cases tab (same filter panel, sortable columns,
+// and a location column).
+const DASH_COLUMNS = {
+  closed: [["ref","Ref"],["type","Type"],["cat","Category"],["opened","Opened"],["loc","Location"],["reporter","Reporter / requester"],["handler","Owner / handler"],["closed","Closed on"],["closure","Closure"]],
+  requests: [["ref","Ref"],["cat","Request type"],["opened","Opened"],["loc","Location"],["reporter","Requester"],["handler","Case owner"],["state","State"],["outcome","Outcome"]],
+  cases: [["ref","Ref"],["risk","Risk"],["cat","Category"],["opened","Opened"],["loc","Location"],["reporter","Reporter"],["involved","Involved"],["handler","Handler"],["state","Status"],["days","Days open"],["sla","SLA"]],
+};
+function dashHeadHtml(isReq, isClosed){
+  return DASH_COLUMNS[isClosed ? "closed" : (isReq ? "requests" : "cases")].map(([key,label], i) => {
+    const active = dashSort.key === key;
+    return `<th data-sort-key="${key}" aria-sort="${active?(dashSort.dir===1?'ascending':'descending'):'none'}"${i===0?' style="padding-left:20px"':''}><button type="button" class="th-sort" onclick="setDashSort('${key}')">${esc(label)}<span class="sort-ind" aria-hidden="true">${active?(dashSort.dir===1?'▲':'▼'):''}</span></button></th>`;
+  }).join("");
+}
+function setDashSort(key){
+  if (!DASH_SORT_VALS[key]) return;
+  if (dashSort.key === key) dashSort.dir = -dashSort.dir;
+  else dashSort = { key, dir:1 };
+  updateDashboardResults();
+}
 function updateDashboardResults(){
   const body = $("dashboard-table-body");
   if (!body) return;
   const model = dashboardModel();
+  document.querySelectorAll("#dashboard-table th[data-sort-key]").forEach(th => {
+    const active = dashSort.key === th.dataset.sortKey;
+    th.setAttribute("aria-sort", active ? (dashSort.dir===1?"ascending":"descending") : "none");
+    const ind = th.querySelector(".sort-ind");
+    if (ind) ind.textContent = active ? (dashSort.dir===1?"▲":"▼") : "";
+  });
   body.innerHTML = dashboardRowsHtml(model);
   lastShown = model.shown;
   const result = $("dashboard-result-count");
   if (result) result.textContent = `Showing ${model.shown.length} of ${model.pool.length} ${model.isClosed?'closed items':(model.isReq?'requests':'cases')}`;
   const activeFilters = $("dashboard-active-filters");
   if (activeFilters) activeFilters.innerHTML = dashboardActiveFiltersHtml();
+  const rangeWarn = $("flt-range-warn");
+  if (rangeWarn) rangeWarn.hidden = !customRangeInverted();
   const toggle = $("filter-toggle");
   if (toggle) toggle.textContent = filterButtonText();
   const mine = $("my-work-toggle");
@@ -1226,7 +1407,7 @@ function updateDashboardResults(){
 }
 function myWorkHint(){
   return myWorkEmployeeId()
-    ? "My Work shows open items assigned to you in this tab, with any other filters applied. Order: overdue first, then risk (High, Medium, Low, unset), earliest open-task deadline, then oldest opened."
+    ? "My Work shows open items assigned to you in this tab, with any other filters applied. Order: overdue first, then risk (High, Medium, Low, unset), earliest open-task deadline, then oldest opened. Clicking a column header re-sorts these items until you switch tabs."
     : "My Work is unavailable because your sign-in could not be matched to one directory employee. Ask an administrator to check your directory email. Clear My Work to return to all accessible items.";
 }
 async function renderDashboardInto(el){
@@ -1252,6 +1433,8 @@ async function renderDashboardInto(el){
   const stateOpts = isReq ? [...REQ_STATES]
                           : [...new Set([...INCIDENT_STATES,"Reopened", ...pool.map(c=>c.state).filter(s=>s!=="Closed")])];
   const handlers = hrTeam.map(t=>[t.employee_id, nameOf(t.employee_id)]);
+  // Store-level location options: full store list + anything already on a case.
+  const locOpts = [...new Set([...storeList, OTHER_LOCATION, ...pool.map(c=>c.location)])].filter(Boolean);
   lastShown = shown;   // what Export CSV downloads — exactly the filtered view
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
@@ -1297,21 +1480,17 @@ async function renderDashboardInto(el){
           <label class="filter-field"><span>Duration</span><select data-filter-key="dur" onchange="setFilter('dur',this.value);applyFilters()"><option value="">All durations</option>${ACC_DURATION.map(d=>`<option ${filters.dur===d?'selected':''}>${d}</option>`).join("")}</select></label>`:""}
           <label class="filter-field"><span>${isReq?'Case owner':(isClosed?'Owner / handler':'Handler')}</span><select data-filter-key="handler" onchange="setFilter('handler',this.value);applyFilters()"><option value="">All</option>${handlers.map(([id,n])=>`<option value="${id}" ${filters.handler===id?'selected':''}>${esc(n)}</option>`).join("")}<option value="__ext" ${filters.handler==='__ext'?'selected':''}>External advisor</option></select></label>
           <label class="filter-field"><span>Location state</span><select data-filter-key="us" onchange="setFilter('us',this.value);applyFilters()"><option value="">All states</option>${statesList.map(s=>`<option ${filters.us===s?'selected':''}>${s}</option>`).join("")}</select></label>
+          <label class="filter-field filter-wide-mobile"><span>Location</span><select id="flt-loc" data-filter-key="loc" onchange="setFilter('loc',this.value);applyFilters()"><option value="">All locations</option>${locOpts.map(name=>`<option value="${esc(name)}" ${filters.loc===name?'selected':''}>${esc(name)}</option>`).join("")}</select></label>
           <label class="filter-field filter-wide-mobile"><span>District leader</span><select id="flt-leader" data-filter-key="leader" onchange="setFilter('leader',this.value);applyFilters()"><option value="">All district leaders</option>${[...DISTRICT_LEADERS,"Other"].map(d=>`<option value="${esc(d)}" ${filters.leader===d?'selected':''}>${esc(districtLeaderLabel(d))}</option>`).join("")}</select></label>
-          <label class="filter-field filter-wide-mobile"><span>Period</span><select id="flt-period" data-filter-key="period" onchange="setFilter('period',this.value);applyFilters()"><option value="">All periods</option>${Object.entries(FISCAL_PERIODS).map(([key,p])=>`<option value="${key}" ${filters.period===key?'selected':''}>${esc(p.label)}</option>`).join("")}</select></label>
+          <label class="filter-field filter-wide-mobile"><span>Period</span><select id="flt-period" data-filter-key="period" onchange="setPeriodFilter(this.value)"><option value="">All periods</option>${Object.entries(FISCAL_PERIODS).map(([key,p])=>`<option value="${key}" ${filters.period===key?'selected':''}>${esc(p.label)}</option>`).join("")}<option value="${CUSTOM_PERIOD}" ${filters.period===CUSTOM_PERIOD?'selected':''}>Custom date range…</option></select></label>
+          <div id="flt-period-range" class="filter-field filter-wide-mobile filter-range" ${filters.period===CUSTOM_PERIOD?'':'hidden'}><span>Opened between</span><div class="filter-range-inputs"><input type="date" data-filter-key="pfrom" aria-label="Opened on or after" value="${esc(filters.pfrom)}" onchange="setFilter('pfrom',this.value);applyFilters()"><span aria-hidden="true">–</span><input type="date" data-filter-key="pto" aria-label="Opened on or before" value="${esc(filters.pto)}" onchange="setFilter('pto',this.value);applyFilters()"></div><div id="flt-range-warn" class="note-sm" role="alert" style="color:var(--danger)" ${customRangeInverted()?'':'hidden'}>The first date is after the second, so no cases can match. Swap or adjust the dates.</div></div>
         </div>
       </div>
     </div>
     <div id="manualbox">${showManual&&!isClosed?(draftKindOf(manual)==="request"?renderManualRequest():renderManual()):""}</div>
     <div class="card" style="padding:8px 0;overflow-x:auto"><table id="dashboard-table">
-      ${isClosed
-      ? `<thead><tr><th style="padding-left:20px">Ref</th><th>Type</th><th>Category</th><th>Opened</th><th>Location</th><th>Reporter / requester</th><th>Owner / handler</th><th>Closed</th><th>Closure</th></tr></thead>
-      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`
-      : isReq
-      ? `<thead><tr><th style="padding-left:20px">Ref</th><th>Request type</th><th>Opened</th><th>Requester</th><th>Case owner</th><th>State</th><th>Outcome</th></tr></thead>
-      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`
-      : `<thead><tr><th style="padding-left:20px">Ref</th><th>Risk</th><th>Category</th><th>Opened</th><th>Location</th><th>Reporter</th><th>Involved</th><th>Handler</th><th>Status</th><th>Days open</th><th>SLA</th></tr></thead>
-      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>`}
+      <thead><tr>${dashHeadHtml(isReq,isClosed)}</tr></thead>
+      <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>
     </table></div>`;
 }
 // ---------------- WORKERS' COMP TRACKER (source spec, 8/21) -----------------
@@ -1546,7 +1725,14 @@ async function wcSave(){
 const lgDue = r => r.case_state === "Active" && r.due_date
   && new Date(String(r.due_date).slice(0,10)+"T00:00:00") <= new Date();
 const lgStatusPill = s => !s ? '<span class="muted">—</span>'
-  : `<span class="pill ${s==="Litigation"?"due-over":"dot"}">${esc(s)}</span>`;
+  : `<span class="pill ${s==="Litigation"?"due-over":s==="Settlement Reached"?"due-ok":"dot"}">${esc(s)}</span>`;
+// Currency display for the T137 financial fields. Off-list junk (shouldn't
+// happen — the DB column is numeric) falls back to the raw escaped string.
+const fmtMoney = v => {
+  if (v === null || v === undefined || v === "") return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString("en-US",{style:"currency",currency:"USD"}) : String(v);
+};
 // docs_link is UNTRUSTED free text (the workbook mixed URLs and prose, and one
 // cell holds two URLs). Only http(s) URLs become links — attribute-escaped, and
 // target=_blank always pairs with rel="noopener noreferrer". Anything else
@@ -1570,7 +1756,7 @@ function legalModel(){
       (lgFilters.quick === "litigation" && r.case_state === "Active" && r.status === "Litigation") ||
       (lgFilters.quick === "due" && lgDue(r))) &&
     (!q || [r.ref, r.complainant, r.opposing_counsel, r.company_counsel, r.eb_point,
-      r.synopsis, r.pending_action, r.epli_notes, r.notes].some(v => (v||"").toLowerCase().includes(q))));
+      r.synopsis, r.pending_action, r.epli_notes, r.notes, r.violation_description].some(v => (v||"").toLowerCase().includes(q))));
   return { rows:legalData, shown };
 }
 function legalRowsHtml({shown}){
@@ -1650,23 +1836,49 @@ async function renderLegalInto(el){
   if (sel) {
     const stillCurrent = () => epoch === sessionEpoch && session?.user?.id === userId
       && dashView === dv && lgSelected === sel.id && el.isConnected;
-    const [notesResult, filesResult] = await Promise.all([
+    const [notesResult, filesResult, linksResult] = await Promise.all([
       sb.from("legal_case_notes").select("*").eq("legal_case_id",sel.id).order("created_at",{ascending:true}),
       listLegalDocuments(sel.id, stillCurrent),
+      sb.from("legal_case_links").select("*").eq("legal_case_id",sel.id).order("created_at",{ascending:true}),
     ]);
     if (!stillCurrent() || filesResult.stale) return;
+    // T137 linked cases: fetch the linked case rows the viewer is allowed to
+    // see (RLS/can_see_case filters silently) and each visible case's evidence
+    // folder. A link whose case stays invisible renders from linked_ref only.
+    const links = linksResult.data || [];
+    const linkedCases = {}, linkedFiles = {};
+    if (links.length){
+      const ids = links.map(l=>l.linked_case_id);
+      const { data: visibleCases } = await sb.from("cases").select("id,ref,intake_type,category,state,created_at").in("id",ids);
+      if (!stillCurrent()) return;
+      for (const c of visibleCases || []) linkedCases[c.id] = c;
+      await Promise.all(links.filter(l=>linkedCases[l.linked_case_id]).map(async l=>{
+        const { data: fl } = await sb.storage.from("evidence").list(l.linked_case_id,{limit:100,sortBy:{column:"created_at",order:"desc"}});
+        if (fl) linkedFiles[l.linked_case_id] = fl;
+      }));
+      if (!stillCurrent()) return;
+    }
     legalDetail = {
       notes: notesResult.data || [],
       files: filesResult.data || [],
+      links, linkedCases, linkedFiles,
       errors: [notesResult.error ? "HR notes are unavailable until the Legal Claims detail migration is deployed." : "",
-               filesResult.error ? "Related document storage is not available yet." : ""].filter(Boolean),
+               filesResult.error ? "Related document storage is not available yet." : "",
+               linksResult.error ? "Linked cases are unavailable until the T137 legal migration is deployed." : ""].filter(Boolean),
     };
   } else {
-    legalDetail = { notes:[], files:[], errors:[] };
+    legalDetail = { notes:[], files:[], links:[], linkedCases:{}, linkedFiles:{}, errors:[] };
   }
   if (lgSelected) {
     el.innerHTML = lgSelected === "new" || lgEditing ? lgEditor(sel) : lgSummary(sel);
-    if (legalPreview.open) requestAnimationFrame(() => { setLegalPreviewBackgroundInert(true); $("lg-preview-close")?.focus(); });
+    if (legalPreview.open) {
+      const generation = legalPreviewGeneration;
+      requestAnimationFrame(() => {
+        if (!legalPreview.open || generation !== legalPreviewGeneration || view !== "dashboard" || dashView !== "legal" || !document.querySelector(".legal-preview-modal")) return;
+        setLegalPreviewBackgroundInert(true);
+        $("lg-preview-close")?.focus();
+      });
+    }
     else if (legalPreviewRestoreName) requestAnimationFrame(() => {
       const name=legalPreviewRestoreName; legalPreviewRestoreName="";
       [...document.querySelectorAll("button[data-p]")].find(button=>button.dataset.p===name)?.focus();
@@ -1757,6 +1969,8 @@ function lgSummary(r){
           <div class="kv"><span class="k">Company counsel</span><span>${esc(r.company_counsel||'—')}</span></div>
           <div class="kv"><span class="k">EB point</span><span>${esc(r.eb_point||'—')}</span></div>
           <div class="kv"><span class="k">EPLI tendered</span><span>${esc(r.epli_tendered||'—')}</span></div>
+          <div class="kv"><span class="k">Settlement amount</span><span>${fmtMoney(r.settlement_amount)?`<b>${esc(fmtMoney(r.settlement_amount))}</b> <span class="muted" style="font-size:11px">agreed</span>`:'—'}</span></div>
+          <div class="kv"><span class="k">Penalty amount</span><span>${fmtMoney(r.penalty_amount)?`<b>${esc(fmtMoney(r.penalty_amount))}</b> <span class="muted" style="font-size:11px">court-ordered</span>`:'—'}</span></div>
         </div>
       </div>
       <div class="divider"></div>
@@ -1764,6 +1978,7 @@ function lgSummary(r){
       <div class="grid2 legal-summary-notes">
         <div><div class="mini-l">Pending action</div><div class="detail-copy">${esc(r.pending_action||'—')}</div></div>
         <div><div class="mini-l">EPLI coverage notes</div><div class="detail-copy">${esc(r.epli_notes||'—')}</div></div>
+        <div><div class="mini-l">Violation description</div><div class="detail-copy">${esc(r.violation_description||'—')}</div></div>
       </div>
     </div>
     ${legalDetail.errors.map(m=>`<div class="banner warn">${esc(m)}</div>`).join("")}
@@ -1782,7 +1997,151 @@ function lgSummary(r){
         <div id="lg-doc-status" aria-live="polite">${legalComposer.status?`<div class="banner ok">${esc(legalComposer.status)}</div>`:""}${legalComposer.error?`<div class="banner err">${esc(legalComposer.error)}</div>`:""}</div>
       </div>
     </div>
+    ${lgLinkedCasesCard(r)}
     ${legalPreview.open?lgPreviewModal():""}`;
+}
+// ---- T137 linked cases -----------------------------------------------------
+// A legal case can link other cases (incident cases AND accommodation
+// requests — both live in the cases table) by case-number search. Evidence
+// uploaded to a linked case automatically appears here, read through the
+// EXISTING storage policies: a viewer only sees files of cases they could
+// already open (conflict blinding intact). Case deletion no longer exists in
+// the UI (8/18: no deletes), so the "deleting removes its evidence from the
+// legal view" warning lives on the Unlink action instead.
+// INTENTIONAL: this card renders from lgSummary() ONLY, never from lgEditor().
+// The link search repaints (#lg-link-results) and the render() after
+// link/unlink must stay away from a form full of unsaved field edits. The
+// legal_links harness scene asserts the card is ABSENT in edit mode — keep it
+// that way (or add a wipe-guard first) if the editor ever grows this card.
+function lgLinkedCasesCard(r){
+  const links = legalDetail.links || [];
+  const rows = links.length ? links.map(l=>{
+    const c = legalDetail.linkedCases[l.linked_case_id];
+    const files = legalDetail.linkedFiles[l.linked_case_id] || [];
+    const fileRows = files.map(f=>{
+      // Case evidence names carry either a uuid_ or a timestamp_ uniqueness
+      // prefix (uploadEvidenceFile vs its non-crypto fallback) — strip both.
+      const display = legalDocumentName(f.name).replace(/^\d+_/,'');
+      const kind = attachmentKind(display, f.metadata?.mimetype||"");
+      return `<div class="task"><span><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+        <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+          ${kind!=="download"?`<button class="btn sm sec" data-c="${esc(l.linked_case_id)}" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgLinkedEvidencePreview(this.dataset.c,this.dataset.p,this.dataset.n)">Preview</button>`:""}
+          <button class="btn sm ghost" data-c="${esc(l.linked_case_id)}" data-p="${esc(f.name)}" onclick="lgLinkedEvidenceDownload(this.dataset.c,this.dataset.p)">Download</button>
+        </span></div>`;
+    }).join("");
+    return `<div class="hrnote">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="ref">${esc(c?.ref || l.linked_ref)}</span>
+        ${c?`<span class="chip">${esc(c.intake_type==="request"?"Accommodation / request":"Incident case")}</span> <span>${esc(c.category||"")}</span> <span class="muted">${esc(stlabel(c.state||""))}</span>`
+           :`<span class="muted">Details restricted — this case isn't visible to you, so its evidence stays hidden.</span>`}
+        <button class="btn sm ghost" style="margin-left:auto" data-l="${esc(l.id)}" data-r="${esc(c?.ref || l.linked_ref)}" onclick="lgUnlinkCase(this.dataset.l,this.dataset.r)">Unlink</button>
+      </div>
+      ${c?`<div style="margin-top:8px">${fileRows || '<span class="muted">No evidence uploaded to this case yet.</span>'}</div>`:""}
+    </div>`;
+  }).join("") : '<span class="muted">No linked cases.</span>';
+  return `<div class="card" id="lg-linked-cases">
+    <div class="legal-section-head"><b>Linked cases</b><span class="chip">evidence carries into this view</span></div>
+    <p class="note-sm">Evidence uploaded to a linked case automatically appears below. Unlinking (or deleting) a linked case removes its evidence from this legal case's view — the case and its files themselves are not deleted by unlinking.</p>
+    <div style="margin-top:12px">${rows}</div>
+    <div class="legal-note-compose" style="align-items:flex-end">
+      <div style="flex:1"><label>Link a case by case number</label>
+        <input id="lg-link-q" type="text" autocomplete="off" placeholder="e.g. EB-2026-0142 — incidents and accommodation requests" value="${esc(legalLinkPicker.query)}" oninput="lgLinkSearchInput(this.value)"></div>
+    </div>
+    <div id="lg-link-results" aria-live="polite" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${lgLinkResultsHtml()}</div>
+  </div>`;
+}
+function lgLinkResultsHtml(){
+  if (legalLinkPicker.err) return `<div class="banner err">${esc(legalLinkPicker.err)}</div>`;
+  if (!legalLinkPicker.query.trim() || legalLinkPicker.query.trim().length < 2) return "";
+  if (legalLinkPicker.busy) return `<span class="note-sm">Searching…</span>`;
+  // A match that only got filtered out because it is ALREADY linked must not
+  // read as "no such case" — show it as an inert "Already linked" chip.
+  const linked = legalLinkPicker.linked || [];
+  if (!legalLinkPicker.results.length && !linked.length) return `<span class="note-sm">No matching cases you can access.</span>`;
+  return legalLinkPicker.results.map(c=>`<button type="button" class="btn sm sec" data-c="${esc(c.id)}" onclick="lgLinkCase(this.dataset.c)">${esc(c.ref)} · ${esc(c.intake_type==="request"?"Request":"Incident")}${c.category?` · ${esc(c.category)}`:""} <span class="muted">${esc(stlabel(c.state||""))}</span></button>`).join("")
+    + linked.map(c=>`<span class="chip">${esc(c.ref)} · Already linked</span>`).join("");
+}
+function paintLinkResults(){ const el=$("lg-link-results"); if (el) el.innerHTML = lgLinkResultsHtml(); }
+function lgLinkSearchInput(value){
+  if (!lgSelected || lgSelected === "new" || legalLinkPicker.caseId !== lgSelected) return;
+  legalLinkPicker.query = String(value||"");
+  clearTimeout(legalLinkTimer);
+  legalLinkTimer = setTimeout(()=>{ void lgLinkSearch(); }, 250);
+}
+async function lgLinkSearch(){
+  const caseId = lgSelected;
+  if (!caseId || caseId === "new" || legalLinkPicker.caseId !== caseId) return;
+  const q = legalLinkPicker.query.trim();
+  const seq = ++legalLinkPicker.seq;
+  legalLinkPicker.err = "";
+  if (q.length < 2){ legalLinkPicker.results=[]; legalLinkPicker.linked=[]; legalLinkPicker.busy=false; paintLinkResults(); return; }
+  legalLinkPicker.busy = true; paintLinkResults();
+  // RLS on cases (can_see_case) silently limits results to cases the viewer
+  // may see, which is exactly the set they are allowed to link.
+  const { data, error } = await sb.from("cases").select("id,ref,intake_type,category,state")
+    .ilike("ref",`%${q.replace(/[%_\\]/g,"")}%`).order("ref").limit(8);
+  if (seq !== legalLinkPicker.seq || lgSelected !== caseId) return;
+  legalLinkPicker.busy = false;
+  // Split AFTER the await so the "Already linked" set reflects any link or
+  // unlink that landed while the query was in flight.
+  const already = new Set((legalDetail.links||[]).map(l=>l.linked_case_id));
+  if (error){ legalLinkPicker.err = errText(error); paintLinkResults(); return; }
+  legalLinkPicker.results = (data||[]).filter(c=>!already.has(c.id));
+  legalLinkPicker.linked  = (data||[]).filter(c=>already.has(c.id));
+  paintLinkResults();
+}
+async function lgLinkCase(caseId){
+  const legalId = lgSelected;
+  if (!legalId || legalId === "new") return;
+  const ctx = legalActionContext(legalId), picker = legalLinkPicker;
+  const { error } = await sb.rpc("legal_link_case",{ p_legal_case_id: legalId, p_case_id: caseId });
+  // An in-flight summary action must never repaint a subsequently opened
+  // editor. Returning to the summary refetches the committed link normally.
+  if (!ctx.visible() || lgEditing || legalLinkPicker !== picker) return;
+  if (error){ legalLinkPicker.err = errText(error); paintLinkResults(); return; }
+  legalLinkPicker = { caseId: legalId, query:"", results:[], linked:[], busy:false, err:"", seq: legalLinkPicker.seq };
+  render();
+}
+async function lgUnlinkCase(linkId, ref){
+  const legalId = lgSelected;
+  if (!legalId || legalId === "new") return;
+  if (!confirm(`Remove linked case ${ref}?\n\nRemoving it removes that case's evidence and documents from this legal case's view. The case itself and its files are NOT deleted.`)) return;
+  const ctx = legalActionContext(legalId), picker = legalLinkPicker;
+  const { error } = await sb.rpc("legal_unlink_case",{ p_link_id: linkId });
+  if (!ctx.visible() || lgEditing || legalLinkPicker !== picker) return;
+  if (error){ alert(errText(error)); return; }
+  // Drop the link from local state synchronously so anything that reads
+  // legalDetail.links before the refetch lands (e.g. the search refresh
+  // below) already sees it gone; render() then refetches the real rows.
+  legalDetail.links = (legalDetail.links||[]).filter(l=>l.id!==linkId);
+  render();
+  // The unlinked case may now match the open search again — refresh so a
+  // stale "Already linked" chip doesn't outlive the link it described.
+  if (legalLinkPicker.caseId === legalId && legalLinkPicker.query.trim().length >= 2) void lgLinkSearch();
+}
+async function lgLinkedEvidenceDownload(caseId, fname){
+  const legalId = lgSelected;
+  const listed = (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
+    && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname);
+  if (!legalId || legalId === "new" || !listed || /[\\/]/.test(fname)){ alert("This file is not linked to the open legal case."); return; }
+  const ctx = legalActionContext(legalId);
+  const { data, error } = await sb.storage.from("evidence").download(`${caseId}/${fname}`);
+  if (!ctx.visible()) return;
+  if (error || !data){ alert("Could not download this file: " + (error?.message||"unknown error")); return; }
+  downloadBlob(data, legalDocumentName(fname).replace(/^\d+_/,''));
+}
+async function lgLinkedEvidencePreview(caseId, fname, displayName){
+  const legalId = lgSelected;
+  const listed = (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
+    && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname);
+  if (!legalId || legalId === "new" || !listed || /[\\/]/.test(fname)){ alert("This file is not linked to the open legal case."); return; }
+  const meta = (legalDetail.linkedFiles[caseId]||[]).find(f=>f.name===fname);
+  await openAttachmentPreview({ name: displayName||legalDocumentName(fname), type: meta?.metadata?.mimetype||"",
+    isCurrent: ()=>lgSelected===legalId && (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
+      && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname),
+    authorize: async()=>{ const {data,error}=await sb.storage.from("evidence").createSignedUrl(`${caseId}/${fname}`,120);
+      return { url:data?.signedUrl, error, note:"Private preview access expires after two minutes." }; },
+    download: ()=>lgLinkedEvidenceDownload(caseId,fname) });
 }
 function lgEditor(r){
   const v = k => esc(r ? (r[k] ?? "") : "");
@@ -1811,7 +2170,11 @@ function lgEditor(r){
     </div>
     <div class="mini-l" style="margin-top:12px">Parties</div>
     <div class="grid2">
-      <div><label>Complainant</label><input id="lg-complainant" type="text" value="${v('complainant')}"></div>
+      <div><label>Complainant</label>${employeeLookupHtml(registerEmployeeLookup("lg-complainant", {
+        placeholder:"Fill from the employee directory (optional)…",
+        getSelected: () => null,
+        onPick: d => { const inp=$("lg-complainant"); if(inp) inp.value = `${d.name} (${d.employee_id})`; elRepaint("lg-complainant"); },
+      }))}<input id="lg-complainant" type="text" value="${v('complainant')}"></div>
       <div><label>Opposing counsel or agency</label><input id="lg-opposing_counsel" type="text" value="${v('opposing_counsel')}"></div>
       <div><label>Company legal counsel</label><select id="lg-company_counsel">${opt(LEGAL_COUNSEL, r?r.company_counsel:"")}</select></div>
       <div><label>EB point</label><select id="lg-eb_point">${opt(LEGAL_EB_POINTS, r?r.eb_point:"")}</select></div>
@@ -1822,6 +2185,12 @@ function lgEditor(r){
       <div><label>Tendered to EPLI?</label><select id="lg-epli_tendered">${opt(LEGAL_EPLI, r?r.epli_tendered:"")}</select></div>
     </div>
     <div><label>EPLI coverage notes</label><textarea id="lg-epli_notes" rows="2">${v('epli_notes')}</textarea></div>
+    <div class="mini-l" style="margin-top:12px">Outcome &amp; financials</div>
+    <div class="grid2">
+      <div><label>Settlement amount <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">(agreed, USD)</span></label><input id="lg-settlement_amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${v('settlement_amount')}"></div>
+      <div><label>Penalty amount <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">(court-ordered, USD)</span></label><input id="lg-penalty_amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" value="${v('penalty_amount')}"></div>
+    </div>
+    <div><label>Violation description</label><textarea id="lg-violation_description" rows="2">${v('violation_description')}</textarea></div>
     <div class="mini-l" style="margin-top:12px">Follow-up</div>
     <div><label>Pending action</label><textarea id="lg-pending_action" rows="2">${v('pending_action')}</textarea></div>
     <div class="grid2">
@@ -1835,21 +2204,32 @@ function lgEditor(r){
 }
 function blankLegalComposer(caseId=null){ return {caseId,note:"",files:[],status:"",error:"",noteError:"",retry:false}; }
 function blankLegalPreview(){ return {open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; }
-function lgOpen(id){ lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function lgClose(){ lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
+function lgOpen(id){ lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalLinkPicker={caseId:id==="new"?null:id,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
+function lgClose(){ lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
 function lgEdit(){ if(lgSelected && lgSelected!=="new"){ lgEditing=true; render(); } }
 function lgCancelEdit(){ if(lgSelected==="new") lgClose(); else { lgEditing=false; render(); } }
 async function lgSave(){
   const F = ["case_state","risk_level","status","complainant","claim_type",
     "opposing_counsel","company_counsel","eb_point","synopsis",
     "epli_tendered","epli_notes","pending_action",
-    "due_date","due_date_note","docs_link"];
+    "due_date","due_date_note","docs_link",
+    "settlement_amount","penalty_amount","violation_description"];
   const p = {};
   for (const f of F) p[f] = ($("lg-"+f)?.value ?? "").trim();
   const err = m => { const el=$("lg-err"); el.innerHTML = `<div class="banner err">${esc(m)}</div>`; el.scrollIntoView({behavior:"smooth",block:"center"}); };
   // The workbook has rows identified only by their synopsis (e.g. "Privacy"),
   // so either field is enough — but a fully unlabeled row helps no one.
   if (!p.complainant && !p.synopsis){ err("Enter a complainant or a synopsis."); return; }
+  // The amount fields are type="text" on purpose: type="number" silently
+  // DISCARDS a pasted "12,500.50" from a demand letter (blank field, no error,
+  // indistinguishable from "no amount" on save). Accept common currency
+  // formatting — strip $ , and whitespace — then fail anything still
+  // non-numeric with a readable #lg-err banner instead of a numeric-cast
+  // error from the database. The stripped plain string is what gets saved.
+  for (const [k,label] of [["settlement_amount","settlement amount"],["penalty_amount","penalty amount"]]){
+    p[k] = p[k].replace(/[$,\s]/g,"");
+    if (p[k] && (!Number.isFinite(Number(p[k])) || Number(p[k]) < 0)){ err(`Enter a valid non-negative ${label} — e.g. 12500.50 ($ signs and commas are OK).`); return; }
+  }
   const { error } = await sb.rpc("legal_save", { p_id: lgSelected === "new" ? null : lgSelected, p });
   if (error){ err(errText(error)); return; }
   if (lgSelected === "new") lgSelected = null;
@@ -2215,7 +2595,7 @@ function draftKey(){ return MANUAL_DRAFT_PREFIX + ((session?.user?.email)||"anon
 function draftKindOf(m){ return m && m.kind === "request" ? "request" : "case"; }
 function manualSlotId(){ return draftKindOf(manual) === "request" ? TAB_ID + ":request" : TAB_ID; }
 function manualDirty(){
-  return !!(manual && ((manual.description||"").trim() || (manual.email||"").trim() || (manual.parties||[]).length));
+  return !!(manual && ((manual.description||"").trim() || (manual.email||"").trim() || (manual.requesterId||"") || (manual.parties||[]).length));
 }
 function readDraftStore(){
   try {
@@ -2275,6 +2655,12 @@ function loadManualDraft(kind = "case"){
   if (typeof m.pQuery !== "string") m.pQuery = "";
   if (typeof m.description !== "string") m.description = "";
   if (typeof m.email !== "string") m.email = "";
+  // Requester (requests only): keep the stored pick — a requester who has
+  // since left the directory is caught at submit (and server-side).
+  if (typeof m.requesterId !== "string") m.requesterId = "";
+  if (typeof m.requesterName !== "string") m.requesterName = "";
+  if (typeof m.requesterAutoEmail !== "string") m.requesterAutoEmail = "";
+  if (typeof m.requesterAutoLocation !== "string") m.requesterAutoLocation = "";
   // A location/category that no longer exists would DISPLAY as blank/first-option
   // while the stale value silently submits — keep display and state in agreement.
   // ("Other / not store-specific" is a legal non-store value the select always offers.)
@@ -2323,10 +2709,12 @@ function syncManualFields(){
   if (e) manual.email = e.value;
   if (l) manual.location = l.value;
 }
-function renderManualBox(){
+// skipSync: callers that just WROTE manual.email/location (requester autofill)
+// must not have them clobbered by re-reading the stale DOM inputs.
+function renderManualBox(skipSync = false){
   const el = $("manualbox");
   if (!el) { render(); return; }
-  syncManualFields();
+  if (!skipSync) syncManualFields();
   el.innerHTML = showManual ? (draftKindOf(manual) === "request" ? renderManualRequest() : renderManual()) : "";
 }
 function toggleManual(){
@@ -2438,9 +2826,27 @@ async function submitManual(){
 // incident date — mirrors the employee-facing request intake, which submits
 // p_parties:[] and p_incident_date:null.
 function renderManualRequest(){
+  // T136: the requester is looked up in the employee directory (shared
+  // component), so a request can be opened on behalf of someone else.
+  // Picking a person auto-fills their location and email from the directory.
+  registerEmployeeLookup("m-requester", {
+    placeholder:"Search the directory by name, title, or employee ID…",
+    getSelected: () => manual.requesterId ? { id:manual.requesterId, name:manual.requesterName } : null,
+    onPick: pickManualRequester,
+    onClear: clearManualRequester,
+  });
+  // The UI promises location auto-fill — say so when the picked person's
+  // directory store doesn't map to a known location (derived, not stored:
+  // the note clears itself once a location is chosen).
+  const rqDir = manual.requesterId ? dirMap[manual.requesterId] : null;
+  const rqStoreUnrecognized = !!(rqDir && rqDir.store && canonicalLocation(rqDir.store) === null && !(manual.location||"").trim());
   return `<div class="card" style="border-color:var(--green)">
     <h2 class="section" style="font-size:16px">Add a request manually <span class="chip">received outside the portal</span></h2>
     ${manualDraftAt?`<div class="banner ok" style="margin:6px 0 10px">Restored your unsaved draft (from ${esc(new Date(manualDraftAt).toLocaleString())}). <a onclick="discardManualDraft()" style="cursor:pointer;font-weight:700;text-decoration:underline">Start fresh instead</a></div>`:""}
+    <label>Who is this request for? <span class="muted" style="font-weight:400">(the requester — can be someone other than you)</span></label>
+    ${employeeLookupHtml("m-requester")}
+    ${rqStoreUnrecognized?`<p class="note-sm" style="margin-top:4px"><b>Their location on file (“${esc(rqDir.store)}”) isn't recognized</b> — pick it manually below.</p>`:""}
+    <p class="note-sm" style="margin-top:4px">Picking an employee fills their location and email from the directory. Leave blank if they aren't in it.</p>
     <label>Employee's email (if known)</label><input id="m-email" type="text" value="${esc(manual.email)}" oninput="setM('email',this.value,true)">
     <label for="m-category">Request type</label>
     <select id="m-category" onchange="setM('category',this.value)">${REQUEST_TYPES.map(t=>`<option ${manual.category===t?'selected':''}>${t}</option>`).join("")}</select>
@@ -2455,12 +2861,41 @@ function renderManualRequest(){
     <div style="margin-top:14px"><button class="btn" onclick="submitManualRequest()" ${busy?'disabled':''}>${busy?'<span class="spin"></span> Adding…':'Add request'}</button></div>
   </div>`;
 }
+// T136: selecting / clearing the on-behalf requester. Repaints only the
+// manual box (never render() — the dashboard repaint eats unsaved fields).
+// requesterAutoEmail/-Location remember exactly what the pick auto-filled so
+// clearing the chip can undo it WITHOUT clobbering hand-edited fields.
+function pickManualRequester(d){
+  syncManualFields();
+  manual.requesterId = d.employee_id; manual.requesterName = d.name;
+  manual.requesterAutoEmail = ""; manual.requesterAutoLocation = "";
+  if (!(manual.email||"").trim() && d.email){ manual.email = d.email; manual.requesterAutoEmail = d.email; }
+  const store = canonicalLocation(d.store || "");
+  if (!(manual.location||"").trim() && store){ manual.location = store; manual.requesterAutoLocation = store; }
+  saveManualDraft(); renderManualBox(true);
+}
+function clearManualRequester(){
+  syncManualFields();
+  // Undo the pick's auto-fill only while the field still holds that exact value.
+  if (manual.requesterAutoEmail && manual.email === manual.requesterAutoEmail) manual.email = "";
+  if (manual.requesterAutoLocation && manual.location === manual.requesterAutoLocation) manual.location = "";
+  manual.requesterId = ""; manual.requesterName = "";
+  manual.requesterAutoEmail = ""; manual.requesterAutoLocation = "";
+  saveManualDraft(); renderManualBox(true);
+}
 async function submitManualRequest(){
+  if (busy) return;
   const epoch = sessionEpoch;
   manual.description = $("m-desc")?.value ?? manual.description;
   manual.email = (($("m-email")?.value ?? manual.email)||"").trim();
   manual.location = $("m-location")?.value ?? manual.location;
   errorMsg="";
+  // set_case_requester rejects stale directory ids server-side — catch it
+  // before the case is created (e.g. a restored draft naming someone termed).
+  if(manual.requesterId && !dirMap[manual.requesterId]){
+    errorMsg = "The selected requester is no longer in the employee directory — clear them (×) and pick again, or leave the requester blank.";
+    renderManualBox(); return;
+  }
   const chosenLocation = canonicalLocation(manual.location);
   if(chosenLocation === null){ errorMsg=locationError(false); renderManualBox(); return; }
   manual.location = chosenLocation; manual.usState = stateMap[chosenLocation] || "";
@@ -2471,27 +2906,26 @@ async function submitManualRequest(){
   busy=true; renderManualBox();
   let data, error;
   try {
-    ({ data, error } = await sb.rpc("submit_case_v2", {
-      p_intake_type:"request", p_category:manual.category, p_description:manual.description,
-      p_anonymous:false, p_location:manual.location||null, p_relationship:null, p_role:null,
-      p_contact_email:manual.email||null, p_contact_phone:null, p_parties:[], p_manual:true, p_incident_date:null,
-      p_us_state:manual.usState||null }));
+    // One atomic call snapshots the requester and notification email together
+    // before awaiting. Later edits cannot mix two people's identities.
+    ({ data, error } = await sb.rpc("submit_manual_request", {
+      p_category:manual.category, p_description:manual.description,
+      p_location:manual.location||null, p_contact_email:manual.email||null,
+      p_us_state:manual.usState||null, p_requester_id:manual.requesterId||null }));
   } catch(e) { error = e; }
   if(epoch !== sessionEpoch) return;
   busy=false;
   if(error){ errorMsg = errText(error); renderManualBox(); return; }
-  clearManualDraft(); showManual=false; manual=manualBlank("request");
+  // Creation and requester assignment succeeded in the same transaction.
+  clearManualDraft();
+  showManual=false; manual=manualBlank("request");
   alert(`Request ${data.ref} added.`); render();
 }
 
 // ---- case detail ----
 function partyEditHtml(){
   if (!partyEditor.open) return "";
-  const q = partyEditor.query.trim().toLowerCase();
-  const results = q.length >= 2 ? dirList.filter(d =>
-    (d.name||"").toLowerCase().includes(q) ||
-    (d.title||"").toLowerCase().includes(q)
-  ).slice(0,8) : [];
+  const results = employeeMatches(partyEditor.query);   // shared accent-insensitive lookup (T136)
   return `<div class="party-editor">
     <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
       <div style="min-width:190px"><span class="mini-l">Relationship</span>
@@ -2611,6 +3045,44 @@ async function savePartyEdit(){
   const toggle=$("party-editor-toggle"); if(toggle) toggle.textContent="Edit team members";
 }
 
+// T136 fix pass: recovery path for a manual, named request whose structured
+// requester was never recorded (e.g. the post-submit set_case_requester call
+// failed, or the request predates T136). Handler-only by construction (the
+// case detail view is dashboard-scoped). Reuses the shared lookup component;
+// picking re-issues set_case_requester. Scoped repaints only — never a full
+// render() from inside this control.
+let cdRequester = { caseId:null, err:"", busy:false };
+function cdRequesterHtml(c){
+  if (!(c.intake_type === "request" && c.manual_entry && !c.anonymous && !c.requester_id)) return "";
+  if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false };
+  registerEmployeeLookup("cd-requester", {
+    placeholder:"Search the directory to set the requester…",
+    getSelected: () => null,
+    onPick: d => setCaseRequesterFromDetail(c.id, d.employee_id),
+  });
+  return `<div id="cd-requester-box" class="kv"><span class="k">Set requester</span><span style="flex:1;min-width:240px">
+    ${cdRequester.busy ? '<span class="muted"><span class="spin"></span> Recording requester…</span>' : employeeLookupHtml("cd-requester")}
+    <p class="note-sm" style="margin-top:4px">No structured requester is recorded — the dashboard's Requester column and search won't reflect this request until one is set.</p>
+    ${cdRequester.err?`<div class="banner err">${esc(cdRequester.err)}</div>`:""}
+  </span></div>`;
+}
+function cdRequesterRepaint(c){ const box = $("cd-requester-box"); if (box) box.outerHTML = cdRequesterHtml(c); }
+async function setCaseRequesterFromDetail(caseId, employeeId){
+  const c = caseExport?.c;
+  if (!c || c.id !== caseId || cdRequester.busy) return;
+  const epoch = sessionEpoch;
+  cdRequester = { caseId, err:"", busy:true }; cdRequesterRepaint(c);
+  let error = null;
+  try { ({ error } = await sb.rpc("set_case_requester", { p_case_id: caseId, p_employee_id: employeeId })); }
+  catch(e){ error = e; }
+  if (epoch !== sessionEpoch || selected !== caseId || caseExport?.c?.id !== caseId) return;
+  if (error){ cdRequester = { caseId, err:errText(error), busy:false }; cdRequesterRepaint(c); return; }
+  c.requester_id = employeeId;   // requesterLine() now resolves via the directory
+  cdRequester = { caseId:null, err:"", busy:false };
+  const line = $("case-requester-line"); if (line) line.textContent = requesterLine(c) || "—";
+  const box = $("cd-requester-box"); if (box) box.remove();
+}
+
 async function renderCaseDetailInto(el, id){
   const epoch = sessionEpoch;
   const detailResults = await Promise.all([
@@ -2664,7 +3136,8 @@ async function renderCaseDetailInto(el, id){
     <h2 class="section" style="margin-top:6px">${esc(c.category)}</h2>
     <div class="row">
       <div class="col">
-        <div class="kv"><span class="k">${L(c,'reporter')}</span>${c.anonymous?'<span class="chip">Anonymous — contact info hidden, system emails them updates</span>':`<b>${esc(c.reporter_display||'—')}</b>`}</div>
+        <div class="kv"><span class="k">${L(c,'reporter')}</span>${c.anonymous?'<span class="chip">Anonymous — contact info hidden, system emails them updates</span>':`<b id="case-requester-line">${esc(requesterLine(c)||'—')}</b>`}</div>
+        ${cdRequesterHtml(c)}
         <div class="kv"><span class="k">Location</span><span>${esc(c.location||'—')}</span></div>
         ${!isReq?`<div class="kv"><span class="k">Occurred</span><span>${c.incident_date?esc(c.incident_date):'—'}</span></div>
         <div class="kv"><span class="k">Relationship</span><span>${esc(c.reporter_relationship||'—')}${c.reporter_role?' · '+esc(c.reporter_role):''}</span></div>
@@ -2723,6 +3196,13 @@ async function renderCaseDetailInto(el, id){
       ${!nexts.length&&!canClose?'<span class="muted">Case is closed.</span>':""}
     </div>
   </div>
+  <div class="card"><b>Follow-up tasks &amp; SLAs</b><div style="margin-top:10px">
+    ${(tasks||[]).length?tasks.map(t=>{const over=t.status==="open"&&t.due_at&&new Date(t.due_at).getTime()<now;
+      return `<div class="task">
+        <span style="${t.status==='done'?'text-decoration:line-through;color:var(--grey)':''}">${esc(t.title)}</span>
+        <span class="due" style="color:${over?'var(--red)':'var(--grey)'}">${t.status==='done'?'Done':(over?'Overdue':'Due '+fmt(t.due_at))}</span>
+        <button class="btn sm ghost" onclick="toggleTask('${t.id}',${t.status!=='done'})">${t.status==='done'?'Reopen':'Mark done'}</button></div>`;}).join(""):'<span class="muted">No tasks.</span>'}
+  </div></div>
   ${isReq?`<div class="card">
     <b>Accommodation</b> <span class="chip">for reporting</span>
     <div class="row" style="margin-top:14px">
@@ -2737,21 +3217,15 @@ async function renderCaseDetailInto(el, id){
     </div>
     <div style="margin-top:14px"><button class="btn sm" onclick="saveAccommodation('${c.id}')">Save accommodation details</button></div>
   </div>`:""}
-  <section id="medical-panel" class="card medical-panel" aria-label="Confidential medical documents">
+  ${isReq?`<section id="medical-panel" class="card medical-panel" aria-label="Confidential medical documents">
     ${medicalPanelShellHtml(id)}
-  </section>
+  </section>`:""}
   <div class="row">
     <div class="col card"><b>${L(c,'evidence')}</b>
+      ${isReq?"":'<p class="note-sm" style="margin-top:4px">Doctor notes and other medical paperwork on an incident case belong here under evidence. The identity-verified medical vault applies to accommodation requests only.</p>'}
       <div id="ev-list" style="margin-top:10px">${evidenceHtml(id)}</div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><input id="ev-file" type="file" multiple style="flex:1"><button class="btn sm sec" onclick="uploadCaseEvidence('${c.id}')">Upload</button></div>
     </div>
-    <div class="col card"><b>Follow-up tasks &amp; SLAs</b><div style="margin-top:10px">
-      ${(tasks||[]).length?tasks.map(t=>{const over=t.status==="open"&&t.due_at&&new Date(t.due_at).getTime()<now;
-        return `<div class="task">
-          <span style="${t.status==='done'?'text-decoration:line-through;color:var(--grey)':''}">${esc(t.title)}</span>
-          <span class="due" style="color:${over?'var(--red)':'var(--grey)'}">${t.status==='done'?'Done':(over?'Overdue':'Due '+fmt(t.due_at))}</span>
-          <button class="btn sm ghost" onclick="toggleTask('${t.id}',${t.status!=='done'})">${t.status==='done'?'Reopen':'Mark done'}</button></div>`;}).join(""):'<span class="muted">No tasks.</span>'}
-    </div></div>
   </div>
   ${(cfiles||[]).length?`<div class="card"><b>Files</b> <span class="chip">received by email</span>
     <div style="margin-top:10px">${(cfiles||[]).map(f=>`<div class="task">
@@ -2777,7 +3251,7 @@ async function renderCaseDetailInto(el, id){
       <span><span class="mini-l">Role in case</span><select id="ni-role">${[...PARTY_ROLES,"Other"].map(r=>`<option value="${r}">${rlabel(r)}</option>`).join("")}</select></span>
       <span><span class="mini-l">Date</span><input id="ni-date" type="date"></span>
       <span><span class="mini-l">Local time</span><input id="ni-time" type="time"></span>
-      <span><span class="mini-l">IANA time zone</span>${timezoneSelectHtml("ni-zone",browserTimeZone())}</span>
+      <span><span class="mini-l">Time zone</span>${timezoneSelectHtml("ni-zone",INTERVIEW_TIMEZONES.some(([zone])=>zone===browserTimeZone())?browserTimeZone():"")}</span>
       <span><span class="mini-l">Format</span><select id="ni-format"><option value="">Not recorded</option>${INTERVIEW_FORMATS.map(v=>`<option>${v}</option>`).join("")}</select></span>
       <span><span class="mini-l">Duration (minutes)</span><input id="ni-duration" type="number" min="1" max="1440"></span>
       <span><span class="mini-l">Interviewee title</span><input id="ni-title" type="text"></span>
@@ -2827,7 +3301,10 @@ async function renderCaseDetailInto(el, id){
     ${c.manual_entry&&!c.anonymous&&!c.reporter_display?'':`<p class="note-sm">Messages are also emailed to the reporter automatically${c.anonymous?" — without revealing their address to you":""}.</p>`}
   </div>
   ${closeModal.open?renderCloseModal():""}`;
-  if(medicalPanel.caseId!==id||medicalPanel.status==="idle") void loadMedicalPanel(id);
+  // T135 (Ops/People 9/15): identity verification (MFA/QR) is scoped to
+  // accommodation requests only — the medical vault panel no longer renders,
+  // or triggers the authenticator flow, on incident cases.
+  if(isReq&&(medicalPanel.caseId!==id||medicalPanel.status==="idle")) void loadMedicalPanel(id);
 }
 
 function medicalPanelShellHtml(caseId){
@@ -2863,7 +3340,13 @@ function medicalDocumentHtml(caseId,d,index,permissions){
 }
 function medicalReturnRequestsHtml(caseId){
   const inv=medicalPanel.invite;
-  return `<div class="divider"></div><div class="medical-section-head"><b>Request documents from employee</b><span class="chip">verified recipient</span></div><p class="note-sm">The invitation is bound to this case, expires, and opens only for the signed-in recipient email. “Requested by” is an administrative follow-up date, not a legal deadline, and passing it does not automatically deny a request.</p><div class="row"><div class="col"><span class="mini-l">Recipient email</span><input id="medical-invite-email" type="email" value="${esc(inv.email)}" autocomplete="off" oninput="setMedicalInviteField('email',this.value)"></div><div class="col"><span class="mini-l">Document purpose</span><select id="medical-invite-kind" onchange="setMedicalInviteField('kind',this.value)"><option value="accommodation" ${inv.kind==='accommodation'?'selected':''}>Accommodation</option><option value="fmla" ${inv.kind==='fmla'?'selected':''}>Medical leave (FMLA)</option></select></div><div class="col"><span class="mini-l">Requested by (days)</span><input id="medical-invite-days" type="number" min="${inv.kind==='fmla'?15:1}" max="90" value="${esc(inv.dueDays)}" oninput="setMedicalInviteField('dueDays',this.value)"></div><div class="col"><span class="mini-l">Or requested-by date</span><input id="medical-invite-date" type="date" value="${esc(inv.dueAt)}" oninput="setMedicalInviteField('dueAt',this.value)"></div></div><span class="mini-l">Message (optional)</span><textarea id="medical-invite-message" maxlength="1000" oninput="setMedicalInviteField('message',this.value)">${esc(inv.message)}</textarea><button class="btn sm" ${inv.busy?'disabled aria-busy="true"':''} onclick="createMedicalReturnRequest('${caseId}')">${inv.busy?'Creating…':'Create secure return request'}</button><p class="note-sm">The employee may return a provider letter or another supported document. No blank form or signature is required by this screen.</p>${inv.error?`<div class="banner err">${esc(inv.error)}</div>`:""}${inv.status?`<div class="banner ok">${esc(inv.status)}</div>`:""}
+  // T136: shared directory lookup fills the recipient email (accommodation flow).
+  registerEmployeeLookup("med-invite", {
+    placeholder:"Fill the recipient from the employee directory (optional)…",
+    getSelected: () => null,
+    onPick: d => { if(d.email){ setMedicalInviteField("email", d.email); paintMedicalPanel(); } else { alert(`${d.name} has no email address in the directory — enter the recipient email manually.`); elRepaint("med-invite"); } },
+  });
+  return `<div class="divider"></div><div class="medical-section-head"><b>Request documents from employee</b><span class="chip">verified recipient</span></div><p class="note-sm">The invitation is bound to this case, expires, and opens only for the signed-in recipient email. “Requested by” is an administrative follow-up date, not a legal deadline, and passing it does not automatically deny a request.</p>${employeeLookupHtml("med-invite")}<div class="row"><div class="col"><span class="mini-l">Recipient email</span><input id="medical-invite-email" type="email" value="${esc(inv.email)}" autocomplete="off" oninput="setMedicalInviteField('email',this.value)"></div><div class="col"><span class="mini-l">Document purpose</span><select id="medical-invite-kind" onchange="setMedicalInviteField('kind',this.value)"><option value="accommodation" ${inv.kind==='accommodation'?'selected':''}>Accommodation</option><option value="fmla" ${inv.kind==='fmla'?'selected':''}>Medical leave (FMLA)</option></select></div><div class="col"><span class="mini-l">Requested by (days)</span><input id="medical-invite-days" type="number" min="${inv.kind==='fmla'?15:1}" max="90" value="${esc(inv.dueDays)}" oninput="setMedicalInviteField('dueDays',this.value)"></div><div class="col"><span class="mini-l">Or requested-by date</span><input id="medical-invite-date" type="date" value="${esc(inv.dueAt)}" oninput="setMedicalInviteField('dueAt',this.value)"></div></div><span class="mini-l">Message (optional)</span><textarea id="medical-invite-message" maxlength="1000" oninput="setMedicalInviteField('message',this.value)">${esc(inv.message)}</textarea><button class="btn sm" ${inv.busy?'disabled aria-busy="true"':''} onclick="createMedicalReturnRequest('${caseId}')">${inv.busy?'Creating…':'Create secure return request'}</button><p class="note-sm">The employee may return a provider letter or another supported document. No blank form or signature is required by this screen.</p>${inv.error?`<div class="banner err">${esc(inv.error)}</div>`:""}${inv.status?`<div class="banner ok">${esc(inv.status)}</div>`:""}
     ${medicalPanel.returnRequests.length?`<div class="medical-request-list">${medicalPanel.returnRequests.map(r=>medicalReturnRequestRowHtml(caseId,r)).join("")}</div>`:""}`;
 }
 function medicalReturnRequestRowHtml(caseId,r){
@@ -3116,12 +3599,51 @@ async function removePolicyChip(caseId, p){
 }
 const INTERVIEW_FORMATS = ["Virtual", "Phone", "In person"];
 function browserTimeZone(){ try{return Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";}catch{return "UTC";} }
-function timezoneNames(){ try{return [...new Set(["UTC",...(Intl.supportedValuesOf?.("timeZone")||[]),browserTimeZone()])].sort();}catch{return ["UTC",browserTimeZone()];} }
-function timezoneSelectHtml(id,value){ return `<select id="${id}"><option value="">Not recorded</option>${timezoneNames().map(zone=>`<option value="${esc(zone)}" ${zone===value?'selected':''}>${esc(zone)}</option>`).join("")}</select>`; }
+// T135 (Ops/People 9/15): the zone dropdown offers Pacific / Central / Eastern
+// only. Values stay full IANA names (DB contract); a legacy stored zone outside
+// the trio remains selectable so old rows stay truthful.
+const INTERVIEW_TIMEZONES = [
+  ["America/Los_Angeles","Pacific (PST/PDT)"],
+  ["America/Chicago","Central (CST/CDT)"],
+  ["America/New_York","Eastern (EST/EDT)"],
+];
+const TZ_SHORT = { "America/Los_Angeles":"PT", "America/Chicago":"CT", "America/New_York":"ET", UTC:"UTC" };
+// Wall-clock display: the stored local time is shown as entered (12-hour) with
+// its zone — never converted through the viewer's browser zone.
+function fmtLocalTime(time,zone){
+  if(!time) return "Time not recorded";
+  const [h,m]=String(time).split(":");
+  const hour=Number(h);
+  const label=`${((hour+11)%12)+1}:${m} ${hour<12?"AM":"PM"}`;
+  if(!zone) return label;
+  return TZ_SHORT[zone] ? `${label} ${TZ_SHORT[zone]} (${zone})` : `${label} ${zone}`;
+}
+function timezoneSelectHtml(id,value){
+  const options=[...INTERVIEW_TIMEZONES];
+  if(value&&!options.some(([zone])=>zone===value)) options.unshift([value,`${value} (legacy)`]);   // stored zone outside PT/CT/ET stays selectable, flagged as legacy
+  return `<select id="${id}"><option value="">Not recorded</option>${options.map(([zone,label])=>`<option value="${esc(zone)}" ${zone===value?'selected':''}>${esc(label)}</option>`).join("")}</select>`;
+}
 function interviewPairs(value){
   if(typeof value==="string") try{value=JSON.parse(value);}catch{return [];}
   return Array.isArray(value)?value.filter(pair=>pair&&typeof pair==="object").map(pair=>({id:String(pair.id||crypto.randomUUID()),question:String(pair.question||""),response:String(pair.response||"")})):[];
 }
+// T135: per-interview contact-attempt log ({id, at, note}; migration 20260915 adds the column)
+function interviewAttempts(value){
+  if(typeof value==="string") try{value=JSON.parse(value);}catch{return [];}
+  return Array.isArray(value)?value.filter(a=>a&&typeof a==="object").map(a=>({id:String(a.id||crypto.randomUUID()),at:String(a.at||""),note:String(a.note||"")})):[];
+}
+// a, b, … z, aa, ab, … — the per-case enumeration suffix (EB-2026-0143a style)
+function exportSuffix(index){
+  let s="",n=index;
+  do { s=String.fromCharCode(97+(n%26))+s; n=Math.floor(n/26)-1; } while(n>=0);
+  return s;
+}
+const interviewCode = (snapshot,id) => {
+  const index=(snapshot?.interviews||[]).findIndex(item=>item.id===id);
+  return index<0?"":`${snapshot?.c?.ref||"case"}${exportSuffix(index)}`;
+};
+const interviewBoilerplateHtml = () =>
+  `<div class="iv-boilerplate"><span class="mini-l">Interview introduction — read to the interviewee before the first question</span>${ER_STATEMENT_GUIDE.script.map(line=>`<p>${esc(line)}</p>`).join("")}</div>`;
 function interviewDraft(iv){
   if(!interviewDrafts.has(iv.id)) interviewDrafts.set(iv.id,{
     id:iv.id, interviewee:iv.interviewee||"", role:iv.role_in_case||"", date:iv.interview_date||"",
@@ -3129,19 +3651,22 @@ function interviewDraft(iv){
     duration:iv.duration_minutes==null?"":String(iv.duration_minutes), title:iv.interviewee_title||"",
     location:iv.interviewee_location||"", interviewer:iv.interviewer||"", status:iv.status||"Scheduled",
     notes:iv.notes||"", followUp:iv.follow_up||"", opening:iv.opening_response||"",
-    closing:iv.closing_response||"", pairs:interviewPairs(iv.question_responses)
+    closing:iv.closing_response||"", pairs:interviewPairs(iv.question_responses),
+    attempts:interviewAttempts(iv.contact_attempts), savedAttempts:interviewAttempts(iv.contact_attempts), caNew:""
   });
   return interviewDrafts.get(iv.id);
 }
 function interviewEditorHtml(caseId,iv){
   const d=interviewDraft(iv);
+  const code=interviewCode(caseExport,iv.id);
   return `<div class="iv-row" id="iv-${iv.id}">
+    ${code?`<div style="margin-bottom:8px"><span class="chip">${esc(code)}</span></div>`:""}
     <div class="iv-grid">
       <span><span class="mini-l">Person interviewed</span><input id="iv-name-${iv.id}" type="text" value="${esc(d.interviewee)}" oninput="syncInterviewDraft('${iv.id}')"></span>
       <span><span class="mini-l">Role in case</span><select id="iv-role-${iv.id}" onchange="syncInterviewDraft('${iv.id}')">${[...new Set([...PARTY_ROLES,...(d.role?[d.role]:[]),"Other"])].map(r=>`<option value="${esc(r)}" ${d.role===r?'selected':''}>${esc(rlabel(r))}</option>`).join("")}</select></span>
       <span><span class="mini-l">Date</span><input id="iv-date-${iv.id}" type="date" value="${esc(d.date)}" oninput="syncInterviewDraft('${iv.id}')"></span>
       <span><span class="mini-l">Local time</span><input id="iv-time-${iv.id}" type="time" step="60" value="${esc(String(d.time).slice(0,5))}" oninput="syncInterviewDraft('${iv.id}')">${d.time?'':'<span class="note-sm">Time not recorded</span>'}</span>
-      <span><span class="mini-l">IANA time zone</span>${timezoneSelectHtml(`iv-zone-${iv.id}`,d.time?d.timezone:"").replace('<select ',`<select onchange="syncInterviewDraft('${iv.id}')" `)}</span>
+      <span><span class="mini-l">Time zone</span>${timezoneSelectHtml(`iv-zone-${iv.id}`,d.time?d.timezone:"").replace('<select ',`<select onchange="syncInterviewDraft('${iv.id}')" `)}</span>
       <span><span class="mini-l">Format</span><select id="iv-format-${iv.id}" onchange="syncInterviewDraft('${iv.id}')"><option value="">Not recorded</option>${INTERVIEW_FORMATS.map(v=>`<option ${d.format===v?'selected':''}>${v}</option>`).join("")}</select></span>
       <span><span class="mini-l">Duration (minutes)</span><input id="iv-duration-${iv.id}" type="number" min="1" max="1440" value="${esc(d.duration)}" oninput="syncInterviewDraft('${iv.id}')"></span>
       <span><span class="mini-l">Interviewee title</span><input id="iv-title-${iv.id}" type="text" value="${esc(d.title)}" oninput="syncInterviewDraft('${iv.id}')"></span>
@@ -3150,6 +3675,13 @@ function interviewEditorHtml(caseId,iv){
       <span><span class="mini-l">Status</span><select id="iv-status-${iv.id}" onchange="syncInterviewDraft('${iv.id}')">${INTERVIEW_STATUS.map(s=>`<option ${d.status===s?'selected':''}>${s}</option>`).join("")}</select></span>
       <span><span class="mini-l">Follow-up needed</span><input id="iv-fu-${iv.id}" type="text" value="${esc(d.followUp)}" oninput="syncInterviewDraft('${iv.id}')"></span>
     </div>
+    <div class="iv-attempts" aria-label="Contact attempts">
+      <span class="mini-l">Contact attempts</span>
+      ${d.attempts.length?d.attempts.map((a,index)=>`<div class="iv-attempt"><span class="iv-attempt-at">${esc(fmt(a.at)||"—")}</span><span class="iv-attempt-note">${esc(a.note)}</span><button class="btn sm ghost" onclick="removeInterviewContactAttempt('${caseId}','${iv.id}',${index})" aria-label="Remove contact attempt ${index+1}">×</button></div>`).join(""):'<span class="muted" style="font-size:12px">No contact attempts logged.</span>'}
+      <div class="iv-attempt-add"><input id="iv-ca-new-${iv.id}" type="text" maxlength="500" value="${esc(d.caNew||"")}" placeholder="e.g. Called 3x, no answer — left voicemail" oninput="syncInterviewDraft('${iv.id}')"><button class="btn sm ghost" onclick="logInterviewContactAttempt('${caseId}','${iv.id}')">Log attempt</button></div>
+      <span class="note-sm">Each attempt is stamped with the current date and time and saved immediately. Attempts appear in the case export.</span>
+    </div>
+    ${interviewBoilerplateHtml()}
     <label class="mini-l" for="iv-opening-${iv.id}" style="margin-top:10px">${esc(ER_STATEMENT_GUIDE.openingQuestion)}</label><span class="mini-l">${esc(ER_STATEMENT_GUIDE.responseLabel)}</span>
     <textarea id="iv-opening-${iv.id}" style="min-height:70px" oninput="syncInterviewDraft('${iv.id}')">${esc(d.opening)}</textarea>
     <div class="interview-pairs" aria-label="Case-specific questions">
@@ -3160,19 +3692,93 @@ function interviewEditorHtml(caseId,iv){
     <textarea id="iv-closing-${iv.id}" style="min-height:70px" oninput="syncInterviewDraft('${iv.id}')">${esc(d.closing)}</textarea>
     <label class="mini-l" for="iv-notes-${iv.id}" style="margin-top:10px">Working notes (not copied into statement responses)</label>
     <textarea id="iv-notes-${iv.id}" style="min-height:90px" oninput="syncInterviewDraft('${iv.id}')" onblur="saveInterviewUI('${caseId}','${iv.id}',true)">${esc(d.notes)}</textarea>
-    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="saveInterviewUI('${caseId}','${iv.id}')">Save</button><button class="btn sm ghost" onclick="downloadFilledStatement('${caseId}','${iv.id}')">Download filled statement</button><span class="muted" id="iv-saved-${iv.id}" style="font-size:12px;align-self:center"></span><button class="btn sm ghost" style="margin-left:auto" onclick="deleteInterviewUI('${iv.id}')">Remove</button></div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="saveInterviewUI('${caseId}','${iv.id}')">Save</button><button class="btn sm ghost" onclick="downloadFilledStatement('${caseId}','${iv.id}')">Download filled statement</button><button class="btn sm ghost" onclick="exportInterviewPdf('${caseId}','${iv.id}')">Export interview (PDF)</button><span class="muted" id="iv-saved-${iv.id}" style="font-size:12px;align-self:center"></span><button class="btn sm ghost" style="margin-left:auto" onclick="deleteInterviewUI('${iv.id}')">Remove</button></div>
   </div>`;
 }
 function syncInterviewDraft(id){
   const d=interviewDrafts.get(id); if(!d)return;
   const read=k=>$(`iv-${k}-${id}`)?.value;
-  for(const [key,field] of Object.entries({interviewee:"name",role:"role",date:"date",time:"time",timezone:"zone",format:"format",duration:"duration",title:"title",location:"location",interviewer:"by",status:"status",followUp:"fu",opening:"opening",closing:"closing",notes:"notes"})) if(read(field)!=null)d[key]=read(field);
+  for(const [key,field] of Object.entries({interviewee:"name",role:"role",date:"date",time:"time",timezone:"zone",format:"format",duration:"duration",title:"title",location:"location",interviewer:"by",status:"status",followUp:"fu",opening:"opening",closing:"closing",notes:"notes",caNew:"ca-new"})) if(read(field)!=null)d[key]=read(field);
   d.pairs.forEach(pair=>{const q=$(`iv-q-${id}-${pair.id}`),a=$(`iv-a-${id}-${pair.id}`);if(q)pair.question=q.value;if(a)pair.response=a.value;});
 }
-function rerenderInterview(caseId,id){ syncInterviewDraft(id); const row=$(`iv-${id}`),iv=caseExport?.interviews?.find(item=>item.id===id); if(row&&iv)row.outerHTML=interviewEditorHtml(caseId,iv); }
+function rerenderInterview(caseId,id){ syncInterviewDraft(id); const row=$(`iv-${id}`),iv=caseExport?.interviews?.find(item=>item.id===id); if(row&&iv){row.outerHTML=interviewEditorHtml(caseId,iv);setInterviewContactBusy(id,!!interviewDrafts.get(id)?.attemptPromise);} }
 function addInterviewPair(caseId,id){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d||d.pairs.length>=50)return;d.pairs.push({id:crypto.randomUUID(),question:"",response:""});rerenderInterview(caseId,id);}
 function removeInterviewPair(caseId,id,index){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d)return;d.pairs.splice(index,1);rerenderInterview(caseId,id);}
 function moveInterviewPair(caseId,id,index,delta){syncInterviewDraft(id);const d=interviewDrafts.get(id),to=index+delta;if(!d||to<0||to>=d.pairs.length)return;[d.pairs[index],d.pairs[to]]=[d.pairs[to],d.pairs[index]];rerenderInterview(caseId,id);}
+// ---- T135: contact-attempt log (saved immediately via its own RPC; needs
+// migration 20260915 set_interview_contact_attempts) ------------------------
+function setInterviewContactBusy(id,busy){
+  const box=$(`iv-${id}`)?.querySelector(".iv-attempts");
+  if(box)box.querySelectorAll("button").forEach(button=>{button.disabled=busy;});
+}
+async function persistInterviewContactAttempts(caseId,id){
+  const d=interviewDrafts.get(id); if(!d)return false;
+  const attempts=d.attempts.map(a=>({...a})), epoch=sessionEpoch;
+  const current=()=>epoch===sessionEpoch && selected===caseId && interviewDrafts.get(id)===d;
+  const run=(async()=>{
+    let error;
+    try{ ({error}=await sb.rpc("set_interview_contact_attempts",{p_id:id,p_case_id:caseId,p_attempts:attempts,p_expected_attempts:d.savedAttempts.map(a=>({...a}))})); }
+    catch(caught){ error=caught; }
+    if(!current())return null;
+    if(error){ alert(errText(error)); return false; }
+    d.savedAttempts=attempts.map(a=>({...a}));
+    const row=caseExport?.interviews?.find(item=>item.id===id);
+    if(row)row.contact_attempts=attempts;
+    return true;
+  })();
+  d.attemptPromise=run; setInterviewContactBusy(id,true);
+  try{return await run;}
+  finally{d.attemptPromise=null;if(current())setInterviewContactBusy(id,false);}
+}
+async function logInterviewContactAttempt(caseId,id){
+  syncInterviewDraft(id);
+  const d=interviewDrafts.get(id); if(!d||d.attemptPromise)return;
+  const submitted=$(`iv-ca-new-${id}`)?.value||"",note=submitted.trim();
+  if(!note){ alert('Describe the contact attempt (e.g. "called 3x, no answer").'); return; }
+  if(d.attempts.length>=100){ alert("This interview already has the maximum of 100 logged attempts."); return; }
+  d.attempts.push({id:crypto.randomUUID(),at:new Date().toISOString(),note});
+  if(await persistInterviewContactAttempts(caseId,id)){
+    // Keep the next note if the handler typed while the first was saving.
+    const input=$(`iv-ca-new-${id}`);
+    if(input?.value===submitted){input.value="";d.caNew="";}
+    rerenderInterview(caseId,id);
+    const next=$(`iv-ca-new-${id}`); if(next)next.focus();
+  } else d.attempts.pop();
+}
+async function removeInterviewContactAttempt(caseId,id,index){
+  syncInterviewDraft(id);
+  const d=interviewDrafts.get(id); if(!d||d.attemptPromise||!d.attempts[index])return;
+  if(!confirm("Remove this contact attempt from the log?"))return;
+  const removed=d.attempts.splice(index,1);
+  if(await persistInterviewContactAttempts(caseId,id)) rerenderInterview(caseId,id);
+  else d.attempts.splice(index,0,...removed);
+}
+// ---- T135: per-interview export (print dialog → Save as PDF) ---------------
+function interviewExportDocHtml(iv,snapshot=caseExport){
+  const dash=v=>(v==null||v==="")?"—":esc(v);
+  const kv=(k,v)=>`<tr><th>${esc(k)}</th><td>${(v==null||v==="")?"—":v}</td></tr>`;
+  const code=interviewCode(snapshot,iv.id)||snapshot?.c?.ref||"interview";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>${esc(code)} — interview</title>
+<style>${CASE_SUMMARY_CSS}</style></head><body>
+<h1>${esc(code)} <span class="pillx">Interview</span></h1>
+<div class="sub">Earthbar &amp; Beaming — People Support Portal · Case ${esc(snapshot?.c?.ref||"")} · Interview record · exported ${esc(new Date().toLocaleString())}</div>
+${interviewSummaryHtml(iv,kv,dash,snapshot)}
+</body></html>`;
+}
+async function exportInterviewPdf(caseId,id){
+  const button=document.activeElement; if(button instanceof HTMLButtonElement)button.disabled=true;
+  try{
+    const contactSave=interviewDrafts.get(id)?.attemptPromise;
+    if(contactSave && !await contactSave)return;
+    if(!await saveInterviewUI(caseId,id,false))return;
+    const iv=caseExport?.interviews?.find(item=>item.id===id); if(!iv)return;
+    const win=window.open("","_blank");
+    if(!win){ alert("Allow pop-ups for this site to export the interview as a PDF."); return; }
+    win.document.open(); win.document.write(interviewExportDocHtml(iv,caseExport)); win.document.close();
+    setTimeout(()=>{ try{ win.focus(); win.print(); }catch{} },250);
+  }finally{ if(button instanceof HTMLButtonElement&&button.isConnected)button.disabled=false; }
+}
 function interviewPayload(caseId,id){
   syncInterviewDraft(id);const d=interviewDrafts.get(id); if(!d)return null;
   const duration=d.duration===""?null:Number(d.duration);
@@ -3308,7 +3914,7 @@ function implicatedPeopleForStatement(snapshot=caseExport){
 }
 function statementModel(iv,snapshot=caseExport){
   const pairs=interviewPairs(iv.question_responses);
-  return {metadata:{interviewer:iv.interviewer||"",date:iv.interview_date||"",time:iv.interview_local_time?`${String(iv.interview_local_time).slice(0,5)} ${iv.interview_timezone||""}`.trim():"",interviewee:iv.interviewee||"",intervieweeTitle:iv.interviewee_title||"",intervieweeLocation:iv.interviewee_location||"",duration:iv.duration_minutes?`${iv.duration_minutes} minutes`:"",format:iv.interview_format||"",caseReference:snapshot?.c?.ref||"",implicatedPerson:implicatedPeopleForStatement(snapshot)},openingResponse:iv.opening_response||"",pairs,closingResponse:iv.closing_response||""};
+  return {metadata:{interviewer:iv.interviewer||"",date:iv.interview_date||"",time:iv.interview_local_time?fmtLocalTime(iv.interview_local_time,iv.interview_timezone):"",interviewee:iv.interviewee||"",intervieweeTitle:iv.interviewee_title||"",intervieweeLocation:iv.interviewee_location||"",duration:iv.duration_minutes?`${iv.duration_minutes} minutes`:"",format:iv.interview_format||"",caseReference:snapshot?.c?.ref||"",implicatedPerson:implicatedPeopleForStatement(snapshot)},openingResponse:iv.opening_response||"",pairs,closingResponse:iv.closing_response||""};
 }
 async function ensureStatementTemplate(){
   if(!statementTemplatePromise){const epoch=sessionEpoch,userId=session?.user?.id;statementTemplatePromise=(async()=>{const current=()=>epoch===sessionEpoch&&session?.user?.id===userId;if(!current())throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});const {data,error}=await sb.storage.from(STATEMENT_TEMPLATE_BUCKET).download(STATEMENT_TEMPLATE_OBJECT);if(!current()){clearStatementTemplate();throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});}if(error)throw error;await configureStatementTemplate(data);if(!current()){clearStatementTemplate();throw Object.assign(new Error("Statement download cancelled."),{cancelled:true});}})().catch(error=>{statementTemplatePromise=null;throw error;});}
@@ -3424,8 +4030,7 @@ async function confirmClose(){
 
 // ---------------- EMPLOYEE MENTION LOOKUP ----------------
 function renderLookup(){
-  const results = lookup.query.length>=2 && !lookup.picked ? dirList.filter(d =>
-      (d.name||"").toLowerCase().includes(lookup.query.toLowerCase())).slice(0,8) : [];
+  const results = !lookup.picked ? employeeMatches(lookup.query) : [];   // shared accent-insensitive lookup (T136)
   return `<div class="card" style="max-width:760px;margin:0 auto">
     <h2 class="section">Employee mention lookup</h2>
     <p class="muted">See how many times an employee has been mentioned across cases, and what their role was each time.</p>
@@ -3593,21 +4198,38 @@ function caseMessagesTxt(snapshot=caseExport){
   }
   return lines.join("\r\n");
 }
-function interviewSummaryHtml(iv,kv,dash){
+function interviewSummaryHtml(iv,kv,dash,snapshot=caseExport){
   const pairs=interviewPairs(iv.question_responses);
-  const localTime=iv.interview_local_time?`${esc(String(iv.interview_local_time).slice(0,5))} ${esc(iv.interview_timezone||"")}`:"Time not recorded";
+  const attempts=interviewAttempts(iv.contact_attempts);
+  const localTime=iv.interview_local_time?esc(fmtLocalTime(iv.interview_local_time,iv.interview_timezone)):"Time not recorded";
+  const code=interviewCode(snapshot,iv.id);
   return `<article class="interview-summary"><table class="kv" style="margin-bottom:10px">
+    ${code?kv("Interview reference",esc(code)):""}
     ${kv("Interviewee",dash(iv.interviewee)+(iv.role_in_case?` (${esc(rlabel(iv.role_in_case))})`:""))}
     ${kv("Date",iv.interview_date?esc(fmtDateOnly(iv.interview_date)):"—")}${kv("Local time / IANA zone",localTime)}
     ${kv("Format",dash(iv.interview_format))}${kv("Duration",iv.duration_minutes?`${esc(iv.duration_minutes)} minutes`:"—")}
     ${kv("Interviewee title",dash(iv.interviewee_title))}${kv("Interviewee location",dash(iv.interviewee_location))}
     ${kv("Interviewer / status",dash(iv.interviewer)+" · "+dash(iv.status))}${iv.follow_up?kv("Follow-up",esc(iv.follow_up)):""}
   </table>
+  ${attempts.length?`<h3>Contact attempts</h3><table class="grid"><tr><th>When</th><th>Attempt</th></tr>${attempts.map(a=>`<tr><td style="white-space:nowrap">${esc(fmt(a.at)||"—")}</td><td>${esc(a.note)}</td></tr>`).join("")}</table>`:""}
+  <h3>Interview introduction (read to the interviewee)</h3><div class="box">${ER_STATEMENT_GUIDE.script.map(line=>esc(line)).join("\n")}</div>
   <h3>${esc(ER_STATEMENT_GUIDE.openingQuestion)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(iv.opening_response||"")}</div>
   ${pairs.map((pair,index)=>`<h3>Question ${index+1}: ${esc(pair.question)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(pair.response)}</div>`).join("")}
   <h3>${esc(ER_STATEMENT_GUIDE.closingQuestion)}</h3><div><b>${esc(ER_STATEMENT_GUIDE.responseLabel)}</b></div><div class="box">${esc(iv.closing_response||"")}</div>
   ${iv.notes?`<h3>Working notes (separate from statement responses)</h3><div class="box" style="margin-bottom:16px">${esc(iv.notes)}</div>`:""}</article>`;
 }
+// Shared print stylesheet for the case summary and per-interview export docs.
+const CASE_SUMMARY_CSS = `
+  body{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;color:#111;margin:32px auto;max-width:820px;line-height:1.5;font-size:14px}
+  h1{font-size:22px;margin:0 0 2px} .sub{color:#6b6b6b;font-size:12px;margin-bottom:20px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid #111;padding-bottom:4px;margin:26px 0 10px}
+  table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:5px 10px;vertical-align:top;border-bottom:1px solid #eee;font-size:13.5px}
+  table.kv th{width:190px;color:#6b6b6b;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.07em}
+  table.grid th{color:#6b6b6b;font-size:11px;text-transform:uppercase;letter-spacing:.07em}
+  .box{border:1px solid #ddd;background:#fafafa;padding:12px 14px;white-space:pre-wrap}
+  .muted{color:#6b6b6b} .pillx{display:inline-block;border:1px solid #111;padding:1px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+  @media print{body{margin:12px}}
+`;
 function caseSummaryHtml(snapshot=caseExport){
   const { c, parties, events, tasks, messages, notes, allegations, interviews, actions, attachments=[], handlerName } = snapshot;
   const isReq = c.intake_type === "request";
@@ -3619,17 +4241,7 @@ function caseSummaryHtml(snapshot=caseExport){
     : `${esc(nameOf(p.subject_id))} (${esc(roleOf(p.subject_id)||"")}${p.role_in_case?", "+esc(rlabel(p.role_in_case)):""})`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>${esc(c.ref)} — case summary</title>
-<style>
-  body{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;color:#111;margin:32px auto;max-width:820px;line-height:1.5;font-size:14px}
-  h1{font-size:22px;margin:0 0 2px} .sub{color:#6b6b6b;font-size:12px;margin-bottom:20px}
-  h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid #111;padding-bottom:4px;margin:26px 0 10px}
-  table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:5px 10px;vertical-align:top;border-bottom:1px solid #eee;font-size:13.5px}
-  table.kv th{width:190px;color:#6b6b6b;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.07em}
-  table.grid th{color:#6b6b6b;font-size:11px;text-transform:uppercase;letter-spacing:.07em}
-  .box{border:1px solid #ddd;background:#fafafa;padding:12px 14px;white-space:pre-wrap}
-  .muted{color:#6b6b6b} .pillx{display:inline-block;border:1px solid #111;padding:1px 8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
-  @media print{body{margin:12px}}
-</style></head><body>
+<style>${CASE_SUMMARY_CSS}</style></head><body>
 <h1>${esc(c.ref)} <span class="pillx">${esc(stlabel(c.state))}</span></h1>
 <div class="sub">Earthbar &amp; Beaming — People Support Portal · ${isReq?'Request':'Incident case'} summary · exported ${esc(new Date().toLocaleString())}</div>
 ${sec("Overview", `<table class="kv">
@@ -3642,7 +4254,7 @@ ${sec("Overview", `<table class="kv">
   ${kv("Opened", esc(fmtD(c.created_at)))}
   ${isReq?"":kv("Occurred", c.incident_date?esc(fmtDateOnly(c.incident_date)):"—")}
   ${kv("Closed", c.closed_at?esc(fmtD(c.closed_at)):"—")}
-  ${kv(L(c,'reporter'), c.anonymous?"Anonymous":dash(c.reporter_display))}
+  ${kv(L(c,'reporter'), c.anonymous?"Anonymous":dash(requesterLine(c)))}
   ${isReq?"":kv("Relationship", dash(c.reporter_relationship)+(c.reporter_role?` · ${esc(c.reporter_role)}`:""))}
   ${kv(L(c,'handler'), esc(handlerName)+(c.external?" (EXTERNAL)":""))}
   ${kv("Route reason", dash((c.route_reason||"").replace(/_/g," ")))}
@@ -3665,7 +4277,7 @@ ${isReq?"":sec("Corrective actions", actions.length
   ? `<table class="grid"><tr><th>Action</th><th>Responsible</th><th>Due</th><th>Completed</th><th>Notes</th></tr>${actions.map(a=>`<tr><td>${dash(a.action_type)}</td><td>${dash(a.responsible)}</td><td>${a.due_date?esc(fmtDateOnly(a.due_date)):"—"}</td><td>${a.completed_date?esc(fmtDateOnly(a.completed_date)):"—"}</td><td>${dash(a.notes)}</td></tr>`).join("")}</table>`
   : `<p class="muted">None recorded.</p>`)}
 ${isReq?"":sec("Interviews", interviews.length
-  ? interviews.map(iv=>interviewSummaryHtml(iv,kv,dash)).join("")
+  ? interviews.map(iv=>interviewSummaryHtml(iv,kv,dash,snapshot)).join("")
   : `<p class="muted">None recorded.</p>`) }
 ${sec("Follow-up tasks", tasks.length
   ? `<table class="grid"><tr><th>Task</th><th>Status</th><th>Due</th></tr>${tasks.map(t=>`<tr><td>${dash(t.title)}</td><td>${dash(t.status)}</td><td>${t.due_at?esc(fmt(t.due_at)):"—"}</td></tr>`).join("")}</table>`
@@ -3773,7 +4385,11 @@ const caseFileInventorySignature = files => files.map(file=>[
 async function awaitPendingInterviewSaves(caseId, button){
   if(document.activeElement?.id?.startsWith("iv-")) document.activeElement.blur();
   await Promise.resolve();
-  const pending = (caseExport?.interviews||[]).map(iv=>saveInterviewUI(caseId,iv.id,true));
+  const pending = (caseExport?.interviews||[]).map(async iv=>{
+    const contactSave=interviewDrafts.get(iv.id)?.attemptPromise;
+    if(contactSave && !await contactSave)return false;
+    return saveInterviewUI(caseId,iv.id,true);
+  });
   if(!pending.length) return;
   const status = $("case-export-status");
   if(status?.isConnected) status.textContent = "Saving interviews…";
@@ -3785,15 +4401,19 @@ function attachmentManifest(snapshot){
     `Attachment manifest — ${snapshot.c.ref}`,
     `Exported ${snapshot.exported_at}`,
     "All attachments listed below are included in this archive.",
+    "Reference suffixes (a, b, … z, aa, ab, …) number this case's interviews and attachments in the order they were filed at the time of export.",
     "=".repeat(64), "",
   ];
   if(!snapshot.attachments.length) lines.push("(no attachments)");
   snapshot.attachments.forEach((file, i)=>lines.push(
     `${i+1}. ${file.file_name}`,
+    ...(file.export_code?[`   Reference: ${file.export_code}`]:[]),
     `   Source: ${file.source}`,
     `   Archive path: ${file.zip_path}`,
     `   Size: ${file.size_bytes} bytes`, "",
   ));
+  const interviewRefs=(snapshot.interviews||[]).map((iv,i)=>`${interviewCode(snapshot,iv.id)} — interview: ${iv.interviewee||"(unnamed)"}`);
+  if(interviewRefs.length) lines.push("Interview references (documents in the interviews/ folder):", ...interviewRefs.map(r=>`  ${r}`), "");
   return lines.join("\r\n");
 }
 function assertCaseZipBudget(files, maxBytes=MAX_CASE_EXPORT_BYTES){
@@ -3867,9 +4487,14 @@ async function exportCaseZip(){
     if(knownTotalBytes > MAX_CASE_EXPORT_BYTES) throw new Error("This case has more than 100 MB of attachments. Export them separately or contact support for a larger archive.");
     const used = new Set(["summary.html","messages.txt","case.json","attachments/manifest.txt"]);
     const zipAttachments = [], attachmentMetadata = [];
+    // T135: every interview and attachment gets a suffixed case reference
+    // (EB-2026-0143a, EB-2026-0143b, …) — interviews first, then attachments.
+    const interviewCount = (fresh.interviews||[]).length;
+    const exportCodeFor = index => `${fresh.c.ref||"case"}${exportSuffix(index)}`;
     let totalBytes = 0;
     for(const [index,file] of expected.entries()){
       if(status?.isConnected) status.textContent = `Adding attachments ${index+1}/${expected.length}…`;
+      const exportCode = exportCodeFor(interviewCount + index);
       let data,error;
       if(file.attachmentId){
         const authorized=await authorizeMessageAttachment(caseId,null,file.attachmentId,null);
@@ -3882,12 +4507,12 @@ async function exportCaseZip(){
       if(!stillCurrent()) throw new Error("Export cancelled because the open case or session changed.");
       totalBytes += bytes.byteLength;
       if(totalBytes > MAX_CASE_EXPORT_BYTES) throw new Error("This case has more than 100 MB of attachments. Export them separately or contact support for a larger archive.");
-      const zipPath = uniqueZipPath(file.folder, file.fileName, used);
+      const zipPath = uniqueZipPath(file.folder, `${exportCode} - ${file.fileName}`, used);
       zipAttachments.push({name:zipPath,data:bytes});
       attachmentMetadata.push({
         file_name:file.fileName, source:file.source, storage_path:file.storagePath||null,
         message_id:file.messageId||null, message_attachment_id:file.attachmentId||null,
-        zip_path:zipPath, size_bytes:bytes.byteLength,
+        zip_path:zipPath, size_bytes:bytes.byteLength, export_code:exportCode,
       });
     }
     if(status?.isConnected) status.textContent = "Verifying attachments…";
@@ -3911,11 +4536,18 @@ async function exportCaseZip(){
       attachments:attachmentMetadata, exported_at:new Date().toISOString(),
       export_attachment_bytes:totalBytes,
     };
+    // T135: each interview also ships as its own printable document, named by
+    // its suffixed reference (open in a browser → print → Save as PDF).
+    const interviewZipFiles = (snapshot.interviews||[]).map(iv=>({
+      name:uniqueZipPath("interviews", `${interviewCode(snapshot,iv.id)} - ${safeZipFileName(iv.interviewee||"interview")}.html`, used),
+      data:interviewExportDocHtml(iv,snapshot),
+    }));
     const zipFiles = [
       { name:"summary.html", data:caseSummaryHtml(snapshot) },
       { name:"messages.txt", data:caseMessagesTxt(snapshot) },
       { name:"case.json", data:JSON.stringify(snapshot, null, 2) },
       { name:"attachments/manifest.txt", data:attachmentManifest(snapshot) },
+      ...interviewZipFiles,
       ...zipAttachments,
     ];
     assertCaseZipBudget(zipFiles);

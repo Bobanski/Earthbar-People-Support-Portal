@@ -185,6 +185,13 @@
   /* ---- tables ---- */
   table{width:100%;border-collapse:separate;border-spacing:0;font-size:13.5px}
   th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:12px 8px;border-bottom:1px solid var(--line-2);font-weight:600;vertical-align:bottom}
+  /* T136: sortable dashboard column headers (cases / requests / closed) */
+  .th-sort{appearance:none;background:none;border:0;padding:0;margin:0;font:inherit;color:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+  .th-sort:hover{color:var(--ink)}
+  th[aria-sort="ascending"] .th-sort,th[aria-sort="descending"] .th-sort{color:var(--ink)}
+  .sort-ind{font-size:8px;line-height:1;min-width:8px}
+  /* T136: shared employee lookup (requests requester, legal, accommodations) */
+  .emp-lookup{margin-bottom:6px}
   td{padding:13px 8px;border-bottom:1px solid var(--line);vertical-align:middle;color:var(--ink-2)}
   tbody tr:last-child td{border-bottom:0}
   tr.clk{cursor:pointer}
@@ -302,6 +309,9 @@
   .filter-panel-head .note-sm{margin-top:2px}
   .filter-grid{display:grid;grid-template-columns:repeat(4,minmax(135px,1fr));gap:11px}
   .filter-field{min-width:0}
+  /* T135: custom period date-range inputs */
+  .filter-range-inputs{display:flex;gap:6px;align-items:center}
+  .filter-range-inputs input{flex:1;min-width:0}
   .filter-field>span{display:block;margin:0 0 5px;font-size:10.5px;font-weight:750;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
   .filter-field input,.filter-field select{width:100%;min-width:0}
   .filter-search{grid-column:span 2}
@@ -367,6 +377,16 @@
   .iv-row{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px;background:var(--surface-2);display:flex;flex-direction:column}
   .iv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
   .iv-grid input,.iv-grid select{width:100%}
+  /* T135: interview boilerplate + contact-attempt log */
+  .iv-boilerplate{border:1px solid var(--line);border-left:3px solid var(--line-2);border-radius:10px;background:var(--surface-2);padding:12px 14px;margin-top:12px;font-size:13px;line-height:1.55;color:var(--ink-2)}
+  .iv-boilerplate p{margin:0 0 6px}
+  .iv-boilerplate p:last-child{margin-bottom:0}
+  .iv-attempts{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+  .iv-attempt{display:flex;gap:10px;align-items:baseline;border-left:3px solid var(--line);padding:2px 0 2px 10px;font-size:13px}
+  .iv-attempt-at{color:var(--muted);font-size:11.5px;white-space:nowrap}
+  .iv-attempt-note{flex:1;color:var(--ink-2);white-space:pre-wrap}
+  .iv-attempt-add{display:flex;gap:8px;margin-top:4px}
+  .iv-attempt-add input{flex:1}
   .interview-pairs{display:grid;gap:10px;margin:12px 0}
   .interview-pair{border-left:3px solid var(--line);padding:8px 0 8px 12px;display:grid;gap:7px}
   .interview-pair textarea{min-height:58px}
