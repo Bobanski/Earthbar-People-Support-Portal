@@ -2,6 +2,8 @@
 // Generated 2026-09-04 from Store Directory Live v2 'Stores' tab
 // (Finance/Automated Reports). Regenerate with scripts/gen_store_org.py —
 // do not hand-edit the map.
+// Weho/Rainier assignments verified against Store Master 2026-09-16;
+// scripts/gen_store_org.py preserves these corrections over the older workbook.
 export const STORE_ORG = {
   "BM Arlington": { districtLeader: "Jesse Varela (direct)" },
   "BM Birmingham": { districtLeader: "Jesse Varela (direct)" },
@@ -28,7 +30,7 @@ export const STORE_ORG = {
   "EB Chestnut": { districtLeader: "Kirsten Sharkey" },
   "EB DTLA 6th St": { districtLeader: "Elverth Guardado" },
   "EB The Walk": { districtLeader: "Pablo Pulido" },
-  "EB Weho": { districtLeader: "Garrett Groos (direct)" },
+  "EB Weho": { districtLeader: "Elverth Guardado" },
   "EQ Armonk": { districtLeader: "Alba Delacruz" },
   "EQ Aventura": { districtLeader: "Darrian Richardson (direct)" },
   "EQ Beale St": { districtLeader: "Kirsten Sharkey" },
@@ -82,7 +84,7 @@ export const STORE_ORG = {
   "EQ Pasadena": { districtLeader: "Latoya Martin" },
   "EQ Pine": { districtLeader: "Kirsten Sharkey" },
   "EQ Printing House": { districtLeader: "Brandon Moye" },
-  "EQ Rainier": { districtLeader: "Garrett Groos (direct)" },
+  "EQ Rainier": { districtLeader: "Pablo Pulido" },
   "EQ SOHO": { districtLeader: "Brandon Moye" },
   "EQ San Diego": { districtLeader: "Pablo Pulido" },
   "EQ San Mateo": { districtLeader: "Kirsten Sharkey" },
@@ -110,7 +112,6 @@ export const DISTRICT_LEADERS = [
   "Brandon Moye",
   "Darrian Richardson (direct)",
   "Elverth Guardado",
-  "Garrett Groos (direct)",
   "Jesse Varela (direct)",
   "Kirsten Sharkey",
   "Latoya Martin",
@@ -126,6 +127,7 @@ const BY_NORM = Object.fromEntries(Object.entries(STORE_ORG).map(([k, v]) => [no
 // Directory. Keep aliases explicit and source-controlled so a naming drift
 // cannot silently place a known store under "Other". Normalized keys.
 const NORM_ALIASES = {
+  ebgeweho: "ebweho",
   earthbarburbank: "eqburbank",
   eqcolumbuscircle: "eqcolumbuscir",
   eqdarienct: "eqdarien",

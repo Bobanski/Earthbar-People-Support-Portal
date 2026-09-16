@@ -612,12 +612,59 @@ function employeeMatches(query, limit = 8){
     || normSearch(d.title).includes(q)
     || normSearch(d.employee_id).startsWith(q)).slice(0, limit);
 }
-const employeeLookups = {};   // instance id -> { query, placeholder, getSelected, onPick, onClear }
+const employeeLookups = {};   // instance id -> { query, activeIndex, placeholder, getSelected, onPick, onClear }
 // Hosts re-register on every render so callbacks close over current state;
-// the typed query survives the re-registration.
+// the typed query and keyboard position survive the re-registration. If an
+// async host repaint replaces the focused combobox, restore its focus after
+// the new DOM is installed instead of dropping the user back to the page.
 function registerEmployeeLookup(id, opts){
-  employeeLookups[id] = Object.assign({ query:"" }, employeeLookups[id], opts);
+  const previous = employeeLookups[id] || {};
+  const focused = document.activeElement?.id === `el-in-${id}`;
+  employeeLookups[id] = Object.assign({ query:"", activeIndex:-1, restoreFocus:false }, previous, opts);
+  const context = previous.focusContext;
+  if (context && (context.epoch !== sessionEpoch || context.view !== view || context.caseId !== selected)){
+    employeeLookups[id].restoreFocus = false;
+  }
+  if (focused){
+    employeeLookups[id].restoreFocus = true;
+    employeeLookups[id].focusContext = { epoch:sessionEpoch, view, caseId:selected };
+  }
   return id;
+}
+function employeeLookupResultsHtml(id){
+  const inst = employeeLookups[id]; if (!inst) return "";
+  const results = employeeMatches(inst.query);
+  if (inst.activeIndex >= results.length) inst.activeIndex = results.length - 1;
+  const queried = inst.query.trim().length >= 2;
+  const note = queried && !results.length
+    ? `<p class="note-sm" role="status" aria-live="polite" style="margin-top:6px">${dirLoaded ? "No matching employee in the directory." : "Loading directory…"}</p>` : "";
+  return `${note}<div id="el-list-${id}" role="listbox" aria-label="Employee search results">
+    ${results.map((d,index)=>`<div id="el-opt-${id}-${index}" class="subj-result" role="option" aria-selected="${index === inst.activeIndex}" data-el-instance="${esc(id)}" data-employee-id="${esc(d.employee_id)}" onclick="elPickResult(this)">${esc(d.name)} <span class="muted">(${esc(d.employee_id)})</span> — <span class="muted">${esc(d.title||'')}${d.store?' · '+esc(d.store):''}</span></div>`).join("")}
+  </div>`;
+}
+function elQueueFocus(id){
+  const scheduled = employeeLookups[id]; if (!scheduled) return;
+  const epoch = sessionEpoch, scheduledView = view, scheduledCase = selected;
+  const activeAtQueue = document.activeElement;
+  const pickerHadFocus = !activeAtQueue || activeAtQueue === document.body
+    || activeAtQueue.id === `el-in-${id}` || activeAtQueue.id === `el-clear-${id}`;
+  if (!pickerHadFocus){ scheduled.restoreFocus = false; return; }
+  const request = (scheduled.focusRequest || 0) + 1;
+  scheduled.focusRequest = request;
+  setTimeout(() => {
+    const inst = employeeLookups[id];
+    if (inst !== scheduled || inst.focusRequest !== request || !inst.restoreFocus
+        || sessionEpoch !== epoch || view !== scheduledView || selected !== scheduledCase) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== activeAtQueue
+        && active.id !== `el-in-${id}` && active.id !== `el-clear-${id}`){
+      inst.restoreFocus = false; return;
+    }
+    const target = inst.getSelected?.() ? $(`el-clear-${id}`) : $(`el-in-${id}`);
+    if (!target) return;
+    inst.restoreFocus = false; target.focus();
+    if (target.setSelectionRange) target.setSelectionRange(target.value.length, target.value.length);
+  }, 0);
 }
 function employeeLookupHtml(id){
   const inst = employeeLookups[id];
@@ -626,32 +673,72 @@ function employeeLookupHtml(id){
   if (sel){
     const d = dirMap[sel.id];
     const label = `${d?.name || sel.name || sel.id} (${sel.id})`;
-    return `<div id="el-${id}" class="emp-lookup"><span class="chip">${esc(label)}${d?.store?` · <i>${esc(d.store)}</i>`:""} <a onclick="elClear('${id}')" style="cursor:pointer;color:var(--red);font-weight:700" aria-label="Clear selected employee">×</a></span></div>`;
+    if (inst.restoreFocus) elQueueFocus(id);
+    return `<div id="el-${id}" class="emp-lookup"><span class="chip">${esc(label)}${d?.store?` · <i>${esc(d.store)}</i>`:""} <button id="el-clear-${id}" type="button" class="el-clear" onclick="elClear('${id}')" aria-label="Clear selected employee">×</button></span></div>`;
   }
   const results = employeeMatches(inst.query);
+  if (inst.activeIndex >= results.length) inst.activeIndex = results.length - 1;
+  if (inst.restoreFocus) elQueueFocus(id);
+  const active = inst.activeIndex >= 0 && results[inst.activeIndex] ? ` aria-activedescendant="el-opt-${id}-${inst.activeIndex}"` : "";
   return `<div id="el-${id}" class="emp-lookup">
-    <input id="el-in-${id}" type="text" placeholder="${esc(inst.placeholder || "Search name, title, or employee ID…")}" value="${esc(inst.query)}" autocomplete="off" oninput="elInput('${id}',this.value)">
-    ${inst.query.trim().length >= 2 && !results.length ? `<p class="note-sm" style="margin-top:6px">${dirLoaded ? "No matching employee in the directory." : "Loading directory…"}</p>` : ""}
-    ${results.map(d=>`<div class="subj-result" data-el-instance="${esc(id)}" data-employee-id="${esc(d.employee_id)}" onclick="elPickResult(this)">${esc(d.name)} <span class="muted">(${esc(d.employee_id)})</span> — <span class="muted">${esc(d.title||'')}${d.store?' · '+esc(d.store):''}</span></div>`).join("")}
+    <input id="el-in-${id}" type="text" role="combobox" aria-label="${esc(inst.ariaLabel || "Search employees")}" aria-autocomplete="list" aria-controls="el-list-${id}" aria-expanded="${inst.query.trim().length >= 2}"${active} placeholder="${esc(inst.placeholder || "Search name, title, or employee ID…")}" value="${esc(inst.query)}" autocomplete="off" oninput="elInput('${id}',this.value)" onkeydown="elKeyDown('${id}',event)">
+    <div id="el-results-${id}">${employeeLookupResultsHtml(id)}</div>
   </div>`;
 }
 function elRepaint(id){ const el = $(`el-${id}`); if (el) el.outerHTML = employeeLookupHtml(id); }
+function elRefreshResults(id){
+  const inst = employeeLookups[id], input = $(`el-in-${id}`), results = $(`el-results-${id}`);
+  if (!inst || !input || !results) return;
+  results.innerHTML = employeeLookupResultsHtml(id);
+  const matches = employeeMatches(inst.query), active = inst.activeIndex >= 0 && matches[inst.activeIndex];
+  input.setAttribute("aria-expanded", String(inst.query.trim().length >= 2));
+  if (active) input.setAttribute("aria-activedescendant", `el-opt-${id}-${inst.activeIndex}`);
+  else input.removeAttribute("aria-activedescendant");
+}
 function elInput(id, v){
   const inst = employeeLookups[id]; if (!inst) return;
-  inst.query = v; elRepaint(id);
-  const input = $(`el-in-${id}`); if (input){ input.focus(); input.setSelectionRange(v.length, v.length); }
+  inst.query = v; inst.activeIndex = -1;
+  const input = $(`el-in-${id}`); if (input && input.value !== v) input.value = v;
+  elRefreshResults(id);
+}
+function elKeyDown(id, event){
+  const inst = employeeLookups[id]; if (!inst) return;
+  const results = employeeMatches(inst.query);
+  if (event.key === "Escape"){
+    if (!inst.query && !results.length) return;
+    event.preventDefault(); inst.query = ""; inst.activeIndex = -1;
+    const input = $(`el-in-${id}`); if (input) input.value = "";
+    elRefreshResults(id); return;
+  }
+  if (!results.length || !["ArrowDown","ArrowUp","Enter"].includes(event.key)) return;
+  if (event.key === "Enter"){
+    if (inst.activeIndex < 0) return;
+    event.preventDefault(); elPick(id, results[inst.activeIndex].employee_id); return;
+  }
+  event.preventDefault();
+  if (event.key === "ArrowDown") inst.activeIndex = Math.min(results.length - 1, inst.activeIndex + 1);
+  else inst.activeIndex = inst.activeIndex < 0 ? results.length - 1 : Math.max(0, inst.activeIndex - 1);
+  elRefreshResults(id);
+  $(`el-opt-${id}-${inst.activeIndex}`)?.scrollIntoView({ block:"nearest" });
+}
+function elPick(id, empId){
+  const inst = employeeLookups[id];
+  if (!inst || !empId || !dirMap[empId]) return;
+  inst.query = ""; inst.activeIndex = -1; inst.restoreFocus = true;
+  inst.focusContext = { epoch:sessionEpoch, view, caseId:selected };
+  if (inst.onPick) inst.onPick(dirMap[empId]); else elRepaint(id);
+  elQueueFocus(id);
 }
 function elPickResult(el){
   const id = el?.dataset?.elInstance || "", empId = el?.dataset?.employeeId || "";
-  const inst = employeeLookups[id];
-  if (!inst || !empId || !dirMap[empId]) return;
-  inst.query = "";
-  inst.onPick?.(dirMap[empId]);
+  elPick(id, empId);
 }
 function elClear(id){
   const inst = employeeLookups[id]; if (!inst) return;
-  inst.query = "";
+  inst.query = ""; inst.activeIndex = -1; inst.restoreFocus = true;
+  inst.focusContext = { epoch:sessionEpoch, view, caseId:selected };
   if (inst.onClear) inst.onClear(); else elRepaint(id);
+  elQueueFocus(id);
 }
 
 Object.assign(window, { go, sendOtp, verifyOtp, signOut,
@@ -666,18 +753,19 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, setDashSort, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
-  elInput, elPickResult, elClear,
+  elInput, elKeyDown, elPickResult, elClear,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
   lgLinkSearchInput, lgLinkCase, lgUnlinkCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
+  lgLinkedCaseFilePreview, lgLinkedCaseFileDownload, lgLinkedMessagePreview, lgLinkedMessageDownload,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip, assertCaseZipBudget,
   saveRisk, savePolicies, uploadCaseEvidence,
   togglePartyEditor, setPartyEditRole, onPartyEditInput, pickPartyEditEmployee, removePartyEdit, savePartyEdit,
   onLookupInput, pickLookup, backToLookup, retryMyReports, retryEvidenceUploads,
   setMessageBody, setMessageFiles, sendMessageWithAttachments, previewMessageAttachment, downloadMessageAttachment, closeAttachmentPreview, downloadOpenAttachment,
-  loadMedicalPanel, startMedicalMfa, verifyMedicalMfa, setMedicalFiles, uploadMedicalFiles, previewMedicalDocument, downloadMedicalDocument,
+  loadMedicalPanel, startMedicalMfa, verifyMedicalMfa, handleMedicalQrError, setMedicalFiles, uploadMedicalFiles, previewMedicalDocument, downloadMedicalDocument,
   setMedicalInviteField, createMedicalReturnRequest, resendMedicalReturnRequest, toggleMedicalLegalHold, loadMedicalAudit, setMedicalAuditGroup, previewMedicalRetention, enqueueMedicalRetention,
   sendMedicalReturnForm, revokeMedicalReturnRequest, startMedicalDueDateEdit, setMedicalDueDateValue, cancelMedicalDueDateEdit, saveMedicalDueDate,
   setMedicalReturnFiles, submitMedicalReturnFiles });
@@ -1843,8 +1931,8 @@ async function renderLegalInto(el){
     ]);
     if (!stillCurrent() || filesResult.stale) return;
     // T137 linked cases: fetch the linked case rows the viewer is allowed to
-    // see (RLS/can_see_case filters silently) and each visible case's evidence
-    // folder. A link whose case stays invisible renders from linked_ref only.
+    // see (RLS/can_see_case filters silently) and each visible case's ordinary
+    // file surfaces. A link whose case stays invisible renders from linked_ref only.
     const links = linksResult.data || [];
     const linkedCases = {}, linkedFiles = {};
     if (links.length){
@@ -1853,8 +1941,8 @@ async function renderLegalInto(el){
       if (!stillCurrent()) return;
       for (const c of visibleCases || []) linkedCases[c.id] = c;
       await Promise.all(links.filter(l=>linkedCases[l.linked_case_id]).map(async l=>{
-        const { data: fl } = await sb.storage.from("evidence").list(l.linked_case_id,{limit:100,sortBy:{column:"created_at",order:"desc"}});
-        if (fl) linkedFiles[l.linked_case_id] = fl;
+        const result = await listLinkedCaseDocuments(l.linked_case_id, stillCurrent);
+        if (!result.stale) linkedFiles[l.linked_case_id] = result;
       }));
       if (!stillCurrent()) return;
     }
@@ -1933,6 +2021,68 @@ async function listLegalDocuments(caseId, isCurrent=()=>true){
   }
   return {data:files,error:{message:"More than 5,000 legal documents were found; narrow storage cleanup is required."},stale:false};
 }
+const LINKED_DOCUMENT_PAGE_SIZE = 100;
+const LINKED_DOCUMENT_MAX_ROWS = 5000;
+async function listLinkedEvidence(caseId, isCurrent=()=>true){
+  const files = [], seen = new Set();
+  for (let offset=0; offset<LINKED_DOCUMENT_MAX_ROWS; offset+=LINKED_DOCUMENT_PAGE_SIZE){
+    // Name is immutable for these append-only objects and gives offset paging
+    // a deterministic order even when created_at values tie.
+    const result = await sb.storage.from("evidence").list(caseId,{limit:LINKED_DOCUMENT_PAGE_SIZE,offset,sortBy:{column:"name",order:"asc"}});
+    if (!isCurrent()) return {data:[],error:null,stale:true};
+    if (result.error) return {data:files,error:result.error,stale:false};
+    const page = result.data || [];
+    for (const file of page) if (file?.name && !seen.has(file.name)){seen.add(file.name);files.push(file);}
+    if (page.length < LINKED_DOCUMENT_PAGE_SIZE) return {data:files,error:null,stale:false};
+  }
+  return {data:files,error:{message:"More than 5,000 evidence files were found."},stale:false};
+}
+async function listLinkedCaseFiles(caseId, isCurrent=()=>true){
+  const files = [], seen = new Set();
+  for (let offset=0; offset<LINKED_DOCUMENT_MAX_ROWS; offset+=LINKED_DOCUMENT_PAGE_SIZE){
+    const result = await sb.from("case_files")
+      .select("id,case_id,source,file_name,mime_type,size_bytes,storage_path,email_fallback_url,uploaded_by,created_at")
+      .eq("case_id",caseId).order("created_at",{ascending:false}).order("id",{ascending:false})
+      .range(offset,offset+LINKED_DOCUMENT_PAGE_SIZE-1);
+    if (!isCurrent()) return {data:[],error:null,stale:true};
+    if (result.error) return {data:files,error:result.error,stale:false};
+    const page = result.data || [];
+    for (const file of page) if (file?.id && !seen.has(file.id)){seen.add(file.id);files.push(file);}
+    if (page.length < LINKED_DOCUMENT_PAGE_SIZE) return {data:files,error:null,stale:false};
+  }
+  return {data:files,error:{message:"More than 5,000 case-file attachments were found."},stale:false};
+}
+async function listLinkedMessageFiles(caseId, isCurrent=()=>true){
+  const result = await messageAttachmentAction({action:"list",mode:"handler",caseId});
+  if (!isCurrent()) return {data:[],error:null,stale:true};
+  if (result.error) return {data:[],error:result.error,stale:false};
+  const files = [], seen = new Set();
+  for (const message of result.data?.messages || []) for (const file of message.attachments || []) {
+    if (file?.id && !seen.has(file.id)){seen.add(file.id);files.push({...file,messageId:message.id,messageAt:message.at,sender:message.sender});}
+  }
+  return {data:files,error:null,stale:false};
+}
+async function listLinkedCaseDocuments(caseId, isCurrent=()=>true){
+  // Each source keeps its existing authorization boundary: Storage policies
+  // for ordinary/email evidence, case_files RLS, and the conflict-aware
+  // message-attachments Edge authorization. The restricted medical bucket is
+  // deliberately never queried by this ordinary Legal surface.
+  const [evidenceResult,caseFilesResult,messageFilesResult] = await Promise.all([
+    listLinkedEvidence(caseId,isCurrent),
+    listLinkedCaseFiles(caseId,isCurrent),
+    listLinkedMessageFiles(caseId,isCurrent),
+  ]);
+  if (!isCurrent() || evidenceResult.stale || caseFilesResult.stale || messageFilesResult.stale) {
+    return {evidence:[],caseFiles:[],messageFiles:[],errors:[],stale:true};
+  }
+  return {
+    evidence:evidenceResult.data || [], caseFiles:caseFilesResult.data || [], messageFiles:messageFilesResult.data || [],
+    errors:[evidenceResult.error?"Ordinary evidence could not be loaded.":"",
+      caseFilesResult.error?"Email and case-file attachments could not be loaded.":"",
+      messageFilesResult.error?"Message attachments could not be loaded.":""].filter(Boolean),
+    stale:false,
+  };
+}
 const legalDocumentKind = name => {
   const ext = String(name||"").split(".").pop().toLowerCase();
   if (["png","jpg","jpeg","gif","webp"].includes(ext)) return "image";
@@ -2002,10 +2152,11 @@ function lgSummary(r){
 }
 // ---- T137 linked cases -----------------------------------------------------
 // A legal case can link other cases (incident cases AND accommodation
-// requests — both live in the cases table) by case-number search. Evidence
-// uploaded to a linked case automatically appears here, read through the
-// EXISTING storage policies: a viewer only sees files of cases they could
-// already open (conflict blinding intact). Case deletion no longer exists in
+// requests — both live in the cases table) by case-number search. Ordinary
+// evidence and attachments automatically appear here, read through the
+// EXISTING Storage/RLS/Edge authorization paths: a viewer only sees files of
+// cases they could already open (conflict blinding intact). Medical-vault
+// content is intentionally excluded. Case deletion no longer exists in
 // the UI (8/18: no deletes), so the "deleting removes its evidence from the
 // legal view" warning lives on the Unlink action instead.
 // INTENTIONAL: this card renders from lgSummary() ONLY, never from lgEditor().
@@ -2017,8 +2168,8 @@ function lgLinkedCasesCard(r){
   const links = legalDetail.links || [];
   const rows = links.length ? links.map(l=>{
     const c = legalDetail.linkedCases[l.linked_case_id];
-    const files = legalDetail.linkedFiles[l.linked_case_id] || [];
-    const fileRows = files.map(f=>{
+    const carried = legalDetail.linkedFiles[l.linked_case_id] || {evidence:[],caseFiles:[],messageFiles:[],errors:[]};
+    const evidenceRows = (carried.evidence||[]).map(f=>{
       // Case evidence names carry either a uuid_ or a timestamp_ uniqueness
       // prefix (uploadEvidenceFile vs its non-crypto fallback) — strip both.
       const display = legalDocumentName(f.name).replace(/^\d+_/,'');
@@ -2029,19 +2180,41 @@ function lgLinkedCasesCard(r){
           <button class="btn sm ghost" data-c="${esc(l.linked_case_id)}" data-p="${esc(f.name)}" onclick="lgLinkedEvidenceDownload(this.dataset.c,this.dataset.p)">Download</button>
         </span></div>`;
     }).join("");
+    const caseFileRows = (carried.caseFiles||[]).map(f=>{
+      const kind=attachmentKind(f.file_name,f.mime_type||"");
+      const stored=f.storage_path && caseFilePathAllowed(f,l.linked_case_id);
+      const actions=stored
+        ? `<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">${kind!=="download"?`<button class="btn sm sec" data-c="${esc(l.linked_case_id)}" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" data-t="${esc(f.mime_type||'')}" onclick="lgLinkedCaseFilePreview(this.dataset.c,this.dataset.p,this.dataset.n,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-c="${esc(l.linked_case_id)}" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" onclick="lgLinkedCaseFileDownload(this.dataset.c,this.dataset.p,this.dataset.n)">Download</button></span>`
+        : f.email_fallback_url?.startsWith("https://")
+          ? `<a class="btn sm ghost" href="${esc(f.email_fallback_url)}" target="_blank" rel="noopener noreferrer">Open in mailbox</a>`
+          : '<span class="muted" style="font-size:11px">stored in mailbox</span>';
+      return `<div class="task"><span><b>${esc(f.file_name)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.size_bytes)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>${actions}</div>`;
+    }).join("");
+    const messageRows = (carried.messageFiles||[]).map(f=>{
+      const kind=attachmentKind(f.name,f.type||"");
+      return `<div class="task"><span><b>${esc(f.name)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.size)}${f.messageAt?` · ${fmt(f.messageAt)}`:""}</span></span><span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">${kind!=="download"?`<button id="lg-message-preview-${esc(f.id)}" class="btn sm sec" data-c="${esc(l.linked_case_id)}" data-i="${esc(f.id)}" data-n="${esc(f.name)}" data-t="${esc(f.type||'')}" onclick="lgLinkedMessagePreview(this.dataset.c,this.dataset.i,this.dataset.n,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-c="${esc(l.linked_case_id)}" data-i="${esc(f.id)}" data-n="${esc(f.name)}" onclick="lgLinkedMessageDownload(this.dataset.c,this.dataset.i,this.dataset.n)">Download</button></span></div>`;
+    }).join("");
+    const fileSections = [
+      evidenceRows?`<div class="mini-l">Evidence</div>${evidenceRows}`:"",
+      caseFileRows?`<div class="mini-l" style="margin-top:10px">Email and case files</div>${caseFileRows}`:"",
+      messageRows?`<div class="mini-l" style="margin-top:10px">Message attachments</div>${messageRows}`:"",
+    ].filter(Boolean).join("");
+    const emptyFiles = (carried.errors||[]).length
+      ? '<span class="muted">No authorized files were returned from the attachment surfaces that loaded successfully.</span>'
+      : '<span class="muted">No authorized ordinary evidence or attachments are available for this case.</span>';
     return `<div class="hrnote">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="ref">${esc(c?.ref || l.linked_ref)}</span>
         ${c?`<span class="chip">${esc(c.intake_type==="request"?"Accommodation / request":"Incident case")}</span> <span>${esc(c.category||"")}</span> <span class="muted">${esc(stlabel(c.state||""))}</span>`
-           :`<span class="muted">Details restricted — this case isn't visible to you, so its evidence stays hidden.</span>`}
+           :`<span class="muted">Details restricted — this case isn't visible to you, so its files stay hidden.</span>`}
         <button class="btn sm ghost" style="margin-left:auto" data-l="${esc(l.id)}" data-r="${esc(c?.ref || l.linked_ref)}" onclick="lgUnlinkCase(this.dataset.l,this.dataset.r)">Unlink</button>
       </div>
-      ${c?`<div style="margin-top:8px">${fileRows || '<span class="muted">No evidence uploaded to this case yet.</span>'}</div>`:""}
+      ${c?`<div style="margin-top:8px">${(carried.errors||[]).map(error=>`<div class="banner warn">${esc(error)}</div>`).join("")}${fileSections || emptyFiles}</div>`:""}
     </div>`;
   }).join("") : '<span class="muted">No linked cases.</span>';
   return `<div class="card" id="lg-linked-cases">
-    <div class="legal-section-head"><b>Linked cases</b><span class="chip">evidence carries into this view</span></div>
-    <p class="note-sm">Evidence uploaded to a linked case automatically appears below. Unlinking (or deleting) a linked case removes its evidence from this legal case's view — the case and its files themselves are not deleted by unlinking.</p>
+    <div class="legal-section-head"><b>Linked cases</b><span class="chip">ordinary files carry into this view</span></div>
+    <p class="note-sm">Ordinary evidence, email/case files, and message attachments from a linked case appear below. Restricted medical-vault documents never carry into Legal. Unlinking removes these files from this view; the case and files themselves are not deleted.</p>
     <div style="margin-top:12px">${rows}</div>
     <div class="legal-note-compose" style="align-items:flex-end">
       <div style="flex:1"><label>Link a case by case number</label>
@@ -2122,7 +2295,7 @@ async function lgUnlinkCase(linkId, ref){
 async function lgLinkedEvidenceDownload(caseId, fname){
   const legalId = lgSelected;
   const listed = (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
-    && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname);
+    && (legalDetail.linkedFiles[caseId]?.evidence||[]).some(f=>f.name===fname);
   if (!legalId || legalId === "new" || !listed || /[\\/]/.test(fname)){ alert("This file is not linked to the open legal case."); return; }
   const ctx = legalActionContext(legalId);
   const { data, error } = await sb.storage.from("evidence").download(`${caseId}/${fname}`);
@@ -2133,15 +2306,57 @@ async function lgLinkedEvidenceDownload(caseId, fname){
 async function lgLinkedEvidencePreview(caseId, fname, displayName){
   const legalId = lgSelected;
   const listed = (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
-    && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname);
+    && (legalDetail.linkedFiles[caseId]?.evidence||[]).some(f=>f.name===fname);
   if (!legalId || legalId === "new" || !listed || /[\\/]/.test(fname)){ alert("This file is not linked to the open legal case."); return; }
-  const meta = (legalDetail.linkedFiles[caseId]||[]).find(f=>f.name===fname);
+  const meta = (legalDetail.linkedFiles[caseId]?.evidence||[]).find(f=>f.name===fname);
   await openAttachmentPreview({ name: displayName||legalDocumentName(fname), type: meta?.metadata?.mimetype||"",
     isCurrent: ()=>lgSelected===legalId && (legalDetail.links||[]).some(l=>l.linked_case_id===caseId)
-      && (legalDetail.linkedFiles[caseId]||[]).some(f=>f.name===fname),
+      && (legalDetail.linkedFiles[caseId]?.evidence||[]).some(f=>f.name===fname),
     authorize: async()=>{ const {data,error}=await sb.storage.from("evidence").createSignedUrl(`${caseId}/${fname}`,120);
       return { url:data?.signedUrl, error, note:"Private preview access expires after two minutes." }; },
     download: ()=>lgLinkedEvidenceDownload(caseId,fname) });
+}
+function linkedCaseFile(caseId,path,name){
+  if (!(legalDetail.links||[]).some(l=>l.linked_case_id===caseId)) return null;
+  return (legalDetail.linkedFiles[caseId]?.caseFiles||[]).find(file=>file.storage_path===path&&file.file_name===name) || null;
+}
+async function lgLinkedCaseFileDownload(caseId,path,name){
+  const legalId=lgSelected,file=linkedCaseFile(caseId,path,name);
+  if(!legalId||legalId==="new"||!file||!caseFilePathAllowed(file,caseId)){alert("This file is not linked to the open legal case.");return;}
+  const ctx=legalActionContext(legalId),source=legalDetail;
+  const {data,error}=await sb.storage.from("evidence").download(path);
+  if(!ctx.visible()||legalDetail!==source||!linkedCaseFile(caseId,path,name))return;
+  if(error||!data){alert("Could not download this file: "+(error?.message||"unknown error"));return;}
+  downloadBlob(data,name||path.split("/").pop());
+}
+async function lgLinkedCaseFilePreview(caseId,path,name,type,restoreId){
+  const legalId=lgSelected,file=linkedCaseFile(caseId,path,name);
+  if(!legalId||legalId==="new"||!file||!caseFilePathAllowed(file,caseId)){alert("This file is not linked to the open legal case.");return;}
+  await openAttachmentPreview({name,type,restoreId,
+    isCurrent:()=>lgSelected===legalId&&!!linkedCaseFile(caseId,path,name),
+    authorize:async()=>{const {data,error}=await sb.storage.from("evidence").createSignedUrl(path,120);return {url:data?.signedUrl,error,note:"Private preview access expires after two minutes."};},
+    download:()=>lgLinkedCaseFileDownload(caseId,path,name)});
+}
+function linkedMessageFile(caseId,attachmentId){
+  if (!(legalDetail.links||[]).some(l=>l.linked_case_id===caseId)) return null;
+  return (legalDetail.linkedFiles[caseId]?.messageFiles||[]).find(file=>file.id===attachmentId) || null;
+}
+async function lgLinkedMessageDownload(caseId,attachmentId,name){
+  const legalId=lgSelected,file=linkedMessageFile(caseId,attachmentId);
+  if(!legalId||legalId==="new"||!file){alert("This file is not linked to the open legal case.");return;}
+  const ctx=legalActionContext(legalId),source=legalDetail;
+  const authorized=await authorizeMessageAttachment(caseId,"",attachmentId,"");
+  if(!ctx.visible()||legalDetail!==source||!linkedMessageFile(caseId,attachmentId))return;
+  if(!authorized.url){alert("Could not authorize this download: "+(authorized.error?.message||"unknown error"));return;}
+  const a=document.createElement("a");a.href=authorized.url;a.download=name||file.name||"attachment";a.target="_blank";a.rel="noopener noreferrer";a.referrerPolicy="no-referrer";document.body.appendChild(a);a.click();a.remove();
+}
+async function lgLinkedMessagePreview(caseId,attachmentId,name,type,restoreId){
+  const legalId=lgSelected,file=linkedMessageFile(caseId,attachmentId);
+  if(!legalId||legalId==="new"||!file){alert("This file is not linked to the open legal case.");return;}
+  await openAttachmentPreview({name,type,restoreId,
+    isCurrent:()=>lgSelected===legalId&&!!linkedMessageFile(caseId,attachmentId),
+    authorize:()=>authorizeMessageAttachment(caseId,"",attachmentId,""),
+    download:()=>lgLinkedMessageDownload(caseId,attachmentId,name)});
 }
 function lgEditor(r){
   const v = k => esc(r ? (r[k] ?? "") : "");
@@ -2171,6 +2386,7 @@ function lgEditor(r){
     <div class="mini-l" style="margin-top:12px">Parties</div>
     <div class="grid2">
       <div><label>Complainant</label>${employeeLookupHtml(registerEmployeeLookup("lg-complainant", {
+        ariaLabel:"Search employees for the complainant",
         placeholder:"Fill from the employee directory (optional)…",
         getSelected: () => null,
         onPick: d => { const inp=$("lg-complainant"); if(inp) inp.value = `${d.name} (${d.employee_id})`; elRepaint("lg-complainant"); },
@@ -2204,8 +2420,8 @@ function lgEditor(r){
 }
 function blankLegalComposer(caseId=null){ return {caseId,note:"",files:[],status:"",error:"",noteError:"",retry:false}; }
 function blankLegalPreview(){ return {open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; }
-function lgOpen(id){ lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalLinkPicker={caseId:id==="new"?null:id,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function lgClose(){ lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
+function lgOpen(id){ closeAttachmentPreview(false); lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalLinkPicker={caseId:id==="new"?null:id,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
+function lgClose(){ closeAttachmentPreview(false); lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
 function lgEdit(){ if(lgSelected && lgSelected!=="new"){ lgEditing=true; render(); } }
 function lgCancelEdit(){ if(lgSelected==="new") lgClose(); else { lgEditing=false; render(); } }
 async function lgSave(){
@@ -2830,6 +3046,7 @@ function renderManualRequest(){
   // component), so a request can be opened on behalf of someone else.
   // Picking a person auto-fills their location and email from the directory.
   registerEmployeeLookup("m-requester", {
+    ariaLabel:"Search employees for the request requester",
     placeholder:"Search the directory by name, title, or employee ID…",
     getSelected: () => manual.requesterId ? { id:manual.requesterId, name:manual.requesterName } : null,
     onPick: pickManualRequester,
@@ -3056,6 +3273,7 @@ function cdRequesterHtml(c){
   if (!(c.intake_type === "request" && c.manual_entry && !c.anonymous && !c.requester_id)) return "";
   if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false };
   registerEmployeeLookup("cd-requester", {
+    ariaLabel:"Search employees to set the requester",
     placeholder:"Search the directory to set the requester…",
     getSelected: () => null,
     onPick: d => setCaseRequesterFromDetail(c.id, d.employee_id),
@@ -3329,10 +3547,23 @@ function medicalPanelShellHtml(caseId){
 }
 function medicalMfaHtml(caseId){
   const m=medicalPanel.mfa;
-  if(!m.mode)return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Identity check required</b></div><span class="chip">MFA</span></div><p>This confidential area requires a current code from an authenticator app.</p><button class="btn sm" onclick="startMedicalMfa('${caseId}')">Continue with authenticator</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">This extra step applies only to the restricted medical-document team.</p>`;
-  const qr=/^data:image\/svg\+xml(?:;charset=utf-8|;utf-?8)?,/i.test(m.qr||"")?`<img class="medical-qr" src="${esc(m.qr)}" alt="Authenticator enrollment QR code" referrerpolicy="no-referrer">`:"";
-  return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>${m.mode==="enroll"?'Set up an authenticator':'Enter your authenticator code'}</b></div><span class="chip">MFA</span></div>${m.mode==="enroll"?`<p>Scan this code in an authenticator app. If scanning fails, enter the setup key manually.</p>${qr}<div class="codebox medical-secret"><span class="mini-l">Setup key</span><code>${esc(m.secret)}</code></div>`:`<p>Open your authenticator app and enter its current six-digit code.</p>`}<label for="medical-mfa-code">Six-digit code</label><input id="medical-mfa-code" class="otp-code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"><button class="btn sm" ${m.busy?'disabled aria-busy="true"':''} onclick="verifyMedicalMfa('${caseId}')">${m.busy?'Checking…':m.mode==="enroll"?'Enable and open documents':'Verify and open documents'}</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">Authenticator setup stays in memory only and is cleared when you sign out or leave this case.</p>`;
+  if(!m.mode)return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>Identity check required</b></div><span class="chip">MFA</span></div><p>This confidential area requires a current code from an authenticator app.</p><button class="btn sm" ${m.busy?'disabled aria-busy="true"':''} onclick="startMedicalMfa('${caseId}')">${m.busy?'Starting authenticator…':'Continue with authenticator'}</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">This extra step applies only to the restricted medical-document team.</p>`;
+  const qrSrc=medicalMfaQrSrc(m.qr),qr=qrSrc?`<img class="medical-qr" src="${esc(qrSrc)}" alt="Authenticator enrollment QR code" referrerpolicy="no-referrer" onerror="handleMedicalQrError(this)">`:"";
+  const qrFallback=m.mode==="enroll"&&!qr?'<div class="banner warn medical-qr-status" role="status">The QR code could not be displayed on this device. Use the setup key below instead.</div>':'<div class="banner warn medical-qr-status" role="status" hidden>The QR code could not be displayed on this device. Use the setup key below instead.</div>';
+  return `<div class="medical-head"><div><div class="mini-l">Restricted medical vault</div><b>${m.mode==="enroll"?'Set up an authenticator':'Enter your authenticator code'}</b></div><span class="chip">MFA</span></div>${m.mode==="enroll"?`<p>Open your authenticator app — not your phone's regular Camera app — and choose Add account, then Scan QR code. In Microsoft Authenticator, choose <b>+</b>, <b>Other account</b>, then <b>Scan QR code</b>.</p>${qr}${qrFallback}<div class="codebox medical-secret"><span class="mini-l">Setup key</span><code>${esc(m.secret)}</code></div><p class="note-sm">If this page is open on the same phone, choose manual entry and use the setup key. Keep the default time-based code setting; the app should begin showing a six-digit code that changes periodically.</p>`:`<p>Open your authenticator app and enter its current six-digit code.</p>`}<label for="medical-mfa-code">Six-digit code</label><input id="medical-mfa-code" class="otp-code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"><button class="btn sm" ${m.busy?'disabled aria-busy="true"':''} onclick="verifyMedicalMfa('${caseId}')">${m.busy?'Checking…':m.mode==="enroll"?'Enable and open documents':'Verify and open documents'}</button>${m.error?`<div class="banner err">${esc(m.error)}</div>`:""}<p class="note-sm">Authenticator setup stays in memory only and is cleared when you sign out or leave this case.</p>`;
 }
+function medicalMfaQrSrc(value){
+  const qr=typeof value==="string"?value.trim():"";
+  const match=/^data:image\/svg\+xml((?:;[^,]*)?),(.*)$/is.exec(qr);if(!match)return "";
+  const parameters=match[1].split(";").filter(Boolean).map(v=>v.toLowerCase());
+  if(parameters.some(v=>!["utf8","utf-8","charset=utf-8","base64"].includes(v))||parameters.filter(v=>v==="base64").length>1)return "";
+  try{
+    const payload=match[2],body=parameters.includes("base64")?atob(payload.replace(/\s/g,"")):/^\s*(?:<\?xml|<svg)/i.test(payload)?payload:decodeURIComponent(payload);
+    if(!/^\s*(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(body))return "";
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(body)}`;
+  }catch{return "";}
+}
+function handleMedicalQrError(image){image.hidden=true;const status=image.parentElement?.querySelector(".medical-qr-status");if(status)status.hidden=false;}
 function medicalPreviewKind(d){return d?.mimeType==="application/pdf"?"pdf":/^image\/(png|jpeg)$/i.test(d?.mimeType||"")?"image":"download";}
 function medicalDocumentHtml(caseId,d,index,permissions){
   const kind=medicalPreviewKind(d);
@@ -3342,6 +3573,7 @@ function medicalReturnRequestsHtml(caseId){
   const inv=medicalPanel.invite;
   // T136: shared directory lookup fills the recipient email (accommodation flow).
   registerEmployeeLookup("med-invite", {
+    ariaLabel:"Search employees for the document recipient",
     placeholder:"Fill the recipient from the employee directory (optional)…",
     getSelected: () => null,
     onPick: d => { if(d.email){ setMedicalInviteField("email", d.email); paintMedicalPanel(); } else { alert(`${d.name} has no email address in the directory — enter the recipient email manually.`); elRepaint("med-invite"); } },
@@ -3385,24 +3617,30 @@ async function loadMedicalPanel(caseId){
   medicalPanel.documents=listed.data?.documents||[];medicalPanel.returnRequests=listed.data?.returnRequests||[];medicalPanel.status="ready";medicalPanel.error="";paintMedicalPanel();
 }
 async function startMedicalMfa(caseId){
-  if(selected!==caseId||medicalPanel.error?.code!=="MFA_REQUIRED")return;
+  if(selected!==caseId||medicalPanel.error?.code!=="MFA_REQUIRED"||medicalPanel.mfa.busy)return;
   const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;mfaBusy(true);
-  const factors=await sb.auth.mfa.listFactors();if(!medicalCurrent(caseId,generation,epoch,userId))return;
-  if(factors.error){mfaBusy(false,factors.error.message);return;}
-  const factor=(factors.data?.totp||[]).find(f=>f.status==="verified");
-  if(factor){medicalPanel.mfa={mode:"challenge",factorId:factor.id,qr:"",secret:"",error:"",busy:false};paintMedicalPanel();return;}
-  const enrolled=await sb.auth.mfa.enroll({factorType:"totp",friendlyName:"People Support medical documents"});
-  if(!medicalCurrent(caseId,generation,epoch,userId))return;
-  if(enrolled.error){mfaBusy(false,enrolled.error.message);return;}
-  const qr=enrolled.data?.totp?.qr_code||"",secret=enrolled.data?.totp?.secret||"";
-  medicalPanel.mfa={mode:"enroll",factorId:enrolled.data?.id||"",qr,secret,error:(!qr&&!secret)?"Authenticator setup details were unavailable.":"",busy:false};paintMedicalPanel();
+  try{
+    const factors=await sb.auth.mfa.listFactors();if(!medicalCurrent(caseId,generation,epoch,userId))return;
+    if(factors.error){mfaBusy(false,"Authenticator setup could not be checked. Try again.");return;}
+    const factor=(factors.data?.totp||[]).find(f=>f.status==="verified");
+    if(factor){medicalPanel.mfa={mode:"challenge",factorId:factor.id,qr:"",secret:"",error:"",busy:false};paintMedicalPanel();return;}
+    const stale=(factors.data?.all||[]).filter(f=>f.factor_type==="totp"&&f.status==="unverified"&&f.friendly_name==="People Support medical documents");
+    for(const pending of stale){const removed=await sb.auth.mfa.unenroll({factorId:pending.id});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(removed.error){mfaBusy(false,"An earlier authenticator setup could not be reset. Try again.");return;}}
+    const enrolled=await sb.auth.mfa.enroll({factorType:"totp",friendlyName:"People Support medical documents",issuer:"People Support Portal"});
+    if(!medicalCurrent(caseId,generation,epoch,userId))return;
+    if(enrolled.error){mfaBusy(false,"Authenticator setup could not be started. Try again.");return;}
+    const factorId=enrolled.data?.id||"",qr=enrolled.data?.totp?.qr_code||"",secret=enrolled.data?.totp?.secret||"";
+    if(!factorId||!secret){mfaBusy(false,"Authenticator setup details were unavailable. Try again.");return;}
+    medicalPanel.mfa={mode:"enroll",factorId,qr,secret,error:"",busy:false};paintMedicalPanel();
+  }catch{if(medicalCurrent(caseId,generation,epoch,userId))mfaBusy(false,"Authenticator setup could not be started. Check your connection and try again.");}
 }
 function mfaBusy(busy,error=""){medicalPanel.mfa.busy=busy;medicalPanel.mfa.error=error;paintMedicalPanel();}
 async function verifyMedicalMfa(caseId){
+  if(!session||selected!==caseId||medicalPanel.caseId!==caseId||medicalPanel.mfa.busy)return;
   const code=($("medical-mfa-code")?.value||"").trim();if(!/^\d{6}$/.test(code)){mfaBusy(false,"Enter the six-digit code from your authenticator app.");return;}
-  const factorId=medicalPanel.mfa.factorId;if(!factorId)return;
+  const factorId=medicalPanel.mfa.factorId;if(!factorId){medicalPanel.mfa={mode:"",factorId:"",qr:"",secret:"",error:"Authenticator setup expired. Start the identity check again.",busy:false};paintMedicalPanel();return;}
   const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation;mfaBusy(true);
-  const verified=await sb.auth.mfa.challengeAndVerify({factorId,code});
+  let verified;try{verified=await sb.auth.mfa.challengeAndVerify({factorId,code});}catch{if(medicalCurrent(caseId,generation,epoch,userId))mfaBusy(false,"The authenticator service could not be reached. Check your connection and try again.");return;}
   if(!medicalCurrent(caseId,generation,epoch,userId))return;
   if(verified.error){mfaBusy(false,"That authenticator code did not work. Try the current code.");return;}
   medicalPanel.mfa={mode:"",factorId:"",qr:"",secret:"",error:"",busy:false};medicalPanel.status="idle";await loadMedicalPanel(caseId);
