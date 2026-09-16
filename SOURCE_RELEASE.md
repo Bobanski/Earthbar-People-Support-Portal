@@ -1,15 +1,15 @@
 # Source release
 
-- Release ID: `psp-followups-20260916`
+- Release ID: `requester-change-20260916`
 - Exported: 2026-09-16
-- Private source commit: `876ac70058deb41478975665827dfb155d37440c` (PR #40)
+- Private source commit: `ec2c639ed7adec2fe72259c6d536283ce2a4b828` (PR #41)
 - Scope: seven reviewed static browser files; no source history or application data
 
 ## SHA-256
 
 | File | SHA-256 |
 |---|---|
-| `site/app.js` | `66de39b41d96cdc9d7c0f3073b62752fd610f8ceb4faa22e0b8850103b98c38e` |
+| `site/app.js` | `463477865a773a1998a2c16abbf13d425443416564629a74bdf3ee3b29d9998d` |
 | `site/config.js` | `6af3ce79b3ee89191ae02f1b93915f780fe73c196e20cbfe3ece4a4d7c93c258` |
 | `site/index.html` | `4b14024b346cb503a1ae91931a8995fb5cc269b1ecaa13d45280cdaf6f8f83c9` |
 | `site/minizip.js` | `fafe2933eef0b5aaff1c4451bc5662e81a75d6b99ceb0361495d0e9249a21a7c` |

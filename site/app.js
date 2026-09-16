@@ -753,7 +753,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, setDashSort, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
-  elInput, elKeyDown, elPickResult, elClear,
+  elInput, elKeyDown, elPickResult, elClear, toggleCdRequester,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
@@ -3262,43 +3262,88 @@ async function savePartyEdit(){
   const toggle=$("party-editor-toggle"); if(toggle) toggle.textContent="Edit team members";
 }
 
-// T136 fix pass: recovery path for a manual, named request whose structured
-// requester was never recorded (e.g. the post-submit set_case_requester call
-// failed, or the request predates T136). Handler-only by construction (the
-// case detail view is dashboard-scoped). Reuses the shared lookup component;
-// picking re-issues set_case_requester. Scoped repaints only — never a full
+// T136 fix pass + change flow: set/change control for the structured
+// requester on a manual, named request. No recorded requester (e.g. the
+// post-submit set_case_requester call failed, or the request predates T136)
+// auto-opens the recovery lookup; a recorded requester collapses to a
+// "Change" button on the requester line so HR can correct a wrong pick.
+// Handler-only by construction (the case detail view is dashboard-scoped);
+// set_case_requester re-checks authorization and the manual/named/request
+// gates server-side. Reuses the shared lookup component; picking
+// (re-)issues set_case_requester. Scoped repaints only — never a full
 // render() from inside this control.
-let cdRequester = { caseId:null, err:"", busy:false };
+let cdRequester = { caseId:null, err:"", busy:false, open:false };
+const cdRequesterEligible = c => c.intake_type === "request" && c.manual_entry && !c.anonymous;
+function cdRequesterState(c){
+  if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false, open:!c.requester_id };
+  return cdRequester;
+}
 function cdRequesterHtml(c){
-  if (!(c.intake_type === "request" && c.manual_entry && !c.anonymous && !c.requester_id)) return "";
-  if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false };
+  if (!cdRequesterEligible(c)) return "";
+  const st = cdRequesterState(c);
+  if (c.requester_id && !st.open) return "";
   registerEmployeeLookup("cd-requester", {
-    ariaLabel:"Search employees to set the requester",
-    placeholder:"Search the directory to set the requester…",
+    ariaLabel: c.requester_id ? "Search employees to change the requester" : "Search employees to set the requester",
+    placeholder: c.requester_id ? "Search the directory for the new requester…" : "Search the directory to set the requester…",
     getSelected: () => null,
     onPick: d => setCaseRequesterFromDetail(c.id, d.employee_id),
   });
-  return `<div id="cd-requester-box" class="kv"><span class="k">Set requester</span><span style="flex:1;min-width:240px">
-    ${cdRequester.busy ? '<span class="muted"><span class="spin"></span> Recording requester…</span>' : employeeLookupHtml("cd-requester")}
-    <p class="note-sm" style="margin-top:4px">No structured requester is recorded — the dashboard's Requester column and search won't reflect this request until one is set.</p>
-    ${cdRequester.err?`<div class="banner err">${esc(cdRequester.err)}</div>`:""}
+  const note = c.requester_id
+    ? "Picking an employee replaces the recorded requester. The notification email on file is unchanged."
+    : "No structured requester is recorded — the dashboard's Requester column and search won't reflect this request until one is set.";
+  return `<div id="cd-requester-box" class="kv"><span class="k">${c.requester_id?"Change requester":"Set requester"}</span><span style="flex:1;min-width:240px">
+    ${st.busy ? '<span class="muted"><span class="spin"></span> Recording requester…</span>' : employeeLookupHtml("cd-requester")}
+    <p class="note-sm" style="margin-top:4px">${note}</p>
+    ${st.err?`<div class="banner err">${esc(st.err)}</div>`:""}
   </span></div>`;
 }
-function cdRequesterRepaint(c){ const box = $("cd-requester-box"); if (box) box.outerHTML = cdRequesterHtml(c); }
+function cdRequesterToggleHtml(c){
+  if (!cdRequesterEligible(c) || !c.requester_id) return "";
+  const st = cdRequesterState(c);
+  return `<button id="cd-requester-toggle" class="btn sm ghost" style="margin-left:8px" onclick="toggleCdRequester()" ${st.busy?'disabled':''}>${st.open?'Cancel':'Change'}</button>`;
+}
+function toggleCdRequester(){
+  const c = caseExport?.c;
+  if (!c || !cdRequesterEligible(c) || !c.requester_id) return;
+  const st = cdRequesterState(c);
+  if (st.busy) return;
+  st.open = !st.open; st.err = "";
+  if (st.open){ const inst = employeeLookups["cd-requester"]; if (inst){ inst.query = ""; inst.activeIndex = -1; } }
+  cdRequesterRepaint(c);
+}
+function cdRequesterRepaint(c){
+  const slot = $("cd-requester-slot"); if (slot) slot.innerHTML = cdRequesterHtml(c);
+  const toggle = $("cd-requester-toggle"), toggleHtml = cdRequesterToggleHtml(c);
+  if (toggle) toggle.outerHTML = toggleHtml;
+  else if (toggleHtml){ const line = $("case-requester-line"); if (line) line.insertAdjacentHTML("afterend", toggleHtml); }
+}
 async function setCaseRequesterFromDetail(caseId, employeeId){
   const c = caseExport?.c;
   if (!c || c.id !== caseId || cdRequester.busy) return;
   const epoch = sessionEpoch;
-  cdRequester = { caseId, err:"", busy:true }; cdRequesterRepaint(c);
+  cdRequester = { caseId, err:"", busy:true, open:true }; cdRequesterRepaint(c);
   let error = null;
   try { ({ error } = await sb.rpc("set_case_requester", { p_case_id: caseId, p_employee_id: employeeId })); }
   catch(e){ error = e; }
-  if (epoch !== sessionEpoch || selected !== caseId || caseExport?.c?.id !== caseId) return;
-  if (error){ cdRequester = { caseId, err:errText(error), busy:false }; cdRequesterRepaint(c); return; }
+  if (epoch !== sessionEpoch || selected !== caseId || caseExport?.c?.id !== caseId){
+    // Navigated away mid-flight: drop the busy state, or reopening this
+    // case would show a permanent spinner (state only resets on caseId change).
+    if (cdRequester.caseId === caseId) cdRequester = { caseId:null, err:"", busy:false, open:false };
+    return;
+  }
+  if (error){ cdRequester = { caseId, err:errText(error), busy:false, open:true }; cdRequesterRepaint(c); return; }
   c.requester_id = employeeId;   // requesterLine() now resolves via the directory
-  cdRequester = { caseId:null, err:"", busy:false };
+  // Mirror the server: reporter_display follows the new pick only when a
+  // notification email is on file (non-null reporter_display is the client's
+  // only readable proxy for that — see migration 20260915103000).
+  // dirMap[employeeId] is guaranteed here only because elPick refuses to
+  // fire onPick for ids missing from dirMap.
+  const d = dirMap[employeeId];
+  if (c.reporter_display && d) c.reporter_display = d.name;
+  cdRequester = { caseId, err:"", busy:false, open:false };
+  const inst = employeeLookups["cd-requester"]; if (inst){ inst.query = ""; inst.activeIndex = -1; }
   const line = $("case-requester-line"); if (line) line.textContent = requesterLine(c) || "—";
-  const box = $("cd-requester-box"); if (box) box.remove();
+  cdRequesterRepaint(c);
 }
 
 async function renderCaseDetailInto(el, id){
@@ -3354,8 +3399,8 @@ async function renderCaseDetailInto(el, id){
     <h2 class="section" style="margin-top:6px">${esc(c.category)}</h2>
     <div class="row">
       <div class="col">
-        <div class="kv"><span class="k">${L(c,'reporter')}</span>${c.anonymous?'<span class="chip">Anonymous — contact info hidden, system emails them updates</span>':`<b id="case-requester-line">${esc(requesterLine(c)||'—')}</b>`}</div>
-        ${cdRequesterHtml(c)}
+        <div class="kv"><span class="k">${L(c,'reporter')}</span>${c.anonymous?'<span class="chip">Anonymous — contact info hidden, system emails them updates</span>':`<b id="case-requester-line">${esc(requesterLine(c)||'—')}</b>${cdRequesterToggleHtml(c)}`}</div>
+        <div id="cd-requester-slot">${cdRequesterHtml(c)}</div>
         <div class="kv"><span class="k">Location</span><span>${esc(c.location||'—')}</span></div>
         ${!isReq?`<div class="kv"><span class="k">Occurred</span><span>${c.incident_date?esc(c.incident_date):'—'}</span></div>
         <div class="kv"><span class="k">Relationship</span><span>${esc(c.reporter_relationship||'—')}${c.reporter_role?' · '+esc(c.reporter_role):''}</span></div>
