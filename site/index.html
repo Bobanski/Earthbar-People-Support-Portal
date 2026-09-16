@@ -192,6 +192,8 @@
   .sort-ind{font-size:8px;line-height:1;min-width:8px}
   /* T136: shared employee lookup (requests requester, legal, accommodations) */
   .emp-lookup{margin-bottom:6px}
+  .el-clear{appearance:none;border:0;background:transparent;color:var(--red);font:inherit;font-weight:700;cursor:pointer;padding:2px 5px;margin:-2px -4px -2px 2px;border-radius:5px}
+  .el-clear:focus-visible{outline:2px solid currentColor;outline-offset:1px}
   td{padding:13px 8px;border-bottom:1px solid var(--line);vertical-align:middle;color:var(--ink-2)}
   tbody tr:last-child td{border-bottom:0}
   tr.clk{cursor:pointer}
@@ -291,6 +293,7 @@
   .subj-result{padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-top:6px;cursor:pointer;font-size:13.5px;background:var(--surface-2);
     transition:border-color var(--t) var(--ease),background var(--t) var(--ease),transform var(--t) var(--ease)}
   .subj-result:hover{border-color:rgba(255,255,255,.45);background:var(--surface-3);transform:translateX(2px)}
+  .subj-result[aria-selected="true"]{border-color:var(--ink);box-shadow:var(--focus);background:var(--surface-3)}
 
   /* ---- dashboard ---- */
   .dash-actions{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
@@ -357,6 +360,7 @@
   .medical-request-list .file-actions select,.medical-request-list .file-actions input[type=date]{width:auto;min-width:0;padding:7px 10px}
   .medical-due-edit{background:var(--surface)}
   .medical-qr{display:block;width:min(240px,100%);height:auto;margin:14px auto;border:12px solid #fff;border-radius:10px}
+  .medical-qr[hidden]{display:none}
   .medical-secret{margin:12px 0;overflow-wrap:anywhere}
   .medical-secret code{display:block;margin-top:5px;font-size:14px;letter-spacing:.08em;user-select:all}
   .medical-audit,.medical-retention{margin-top:14px}
