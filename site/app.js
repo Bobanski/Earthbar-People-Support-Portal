@@ -400,6 +400,9 @@ let showManual = false, manual = blankIncident(true);
 let wcSelected = null;      // null = list; "new" = create form; else wc_cases.id
 let wcFilters = { q:"", status:"", state:"", asg:"", quick:"" };
 let wcData = [];
+// WC claim documents. Staged File objects live here (not in the DOM) so the
+// scoped #wc-docs-box repaints never lose a selection; seq guards stale lists.
+let wcDocs = { caseId:null, list:[], loaded:false, listError:"", files:[], status:"", error:"", busy:false, retry:false, seq:0 };
 let lgSelected = null;      // null = list; "new" = create form; else legal_cases.id
 let lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" };   // Active by default (spec)
 let legalData = [];
@@ -755,6 +758,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, setDashSort, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
   elInput, elKeyDown, elPickResult, elClear, toggleCdRequester,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
+  wcSetFiles, wcUploadDocuments, wcDownloadDocument,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
   lgLinkSearchInput, lgLinkCase, lgUnlinkCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
@@ -1785,12 +1789,139 @@ function wcEditor(w){
       <div><label>Date closed</label><input id="wc-date_closed" type="date" value="${d('date_closed')}"></div>
     </div>
     <div><label>Case notes</label><textarea id="wc-case_notes" rows="3">${v('case_notes')}</textarea></div>
+    ${w?`<div class="mini-l" style="margin-top:12px">Claim documents</div>
+    <div id="wc-docs-box">${wcDocsBoxHtml(w.id)}</div>`:""}
     <div id="wc-err"></div>
     <div class="mobile-form-actions"><button class="btn ghost" onclick="wcClose()">Cancel</button><button class="btn" onclick="wcSave()">${w?"Save changes":"Create claim"}</button></div>
   </div>`;
 }
-function wcOpen(id){ wcSelected = id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function wcClose(){ wcSelected = null; render(); }
+// ---- WC claim documents (mirrors the Legal related-documents pattern) ------
+// Storage namespace wc/<claim-id>/ in the `evidence` bucket, HR handlers only,
+// immutable once uploaded (migration 20260916190000). Unlike Legal, the claim
+// editor around this section holds unsaved typed fields read from the DOM at
+// save time, so NO document action may call render(): every repaint is scoped
+// to #wc-docs-box. That is also why there is no preview modal here — the
+// legal-style modal repaints the whole view; documents are download-to-view.
+function blankWcDocs(caseId=null){ return { caseId, list:[], loaded:false, listError:"", files:[], status:"", error:"", busy:false, retry:false, seq:wcDocs.seq }; }
+function wcStoragePath(caseId, storedName){
+  const id = String(caseId||"");
+  const name = String(storedName||"");
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(id) || !name || /[\\/]/.test(name) || name === "." || name === "..") return null;
+  return `wc/${id}/${name}`;
+}
+function wcDocsContext(caseId){
+  const epoch=sessionEpoch, userId=session?.user?.id;
+  const sameIdentity=()=>epoch===sessionEpoch && session?.user?.id===userId
+    && wcSelected===caseId && wcDocs.caseId===caseId;
+  return { sameIdentity, visible:()=>sameIdentity() && view==="dashboard" && dashView==="wc" };
+}
+function wcDocsBoxHtml(caseId){
+  if (wcDocs.caseId!==caseId) return '<span class="muted">Loading documents…</span>';
+  const docs = !wcDocs.loaded ? '<span class="muted">Loading documents…</span>'
+    : wcDocs.list.length ? wcDocs.list.map(f=>{
+        const display = legalDocumentName(f.name);
+        return `<div class="task"><span><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+          <span style="margin-left:auto"><button class="btn sm ghost" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="wcDownloadDocument('${esc(caseId)}',this.dataset.p,this.dataset.n)">Download</button></span></div>`;
+      }).join("") : '<span class="muted">No documents uploaded.</span>';
+  return `${wcDocs.listError?`<div class="banner warn">${esc(wcDocs.listError)}</div>`:""}
+    <div style="margin-top:4px">${docs}</div>
+    <div class="legal-upload"><input id="wc-files" type="file" multiple aria-describedby="wc-staged-files wc-doc-status" onchange="wcSetFiles(this)"><button id="wc-upload-action" class="btn sm sec" aria-busy="${wcDocs.busy}" ${wcDocs.busy?'disabled':''} onclick="wcUploadDocuments('${esc(caseId)}')">${wcDocs.busy?'Uploading…':wcDocs.retry?'Retry failed files':'Upload'}</button></div>
+    <div class="note-sm" id="wc-staged-files">${wcDocs.files.length?`${wcDocs.retry?'Retry queue (stored safely in this tab)':'Selected for upload'}: ${wcDocs.files.map(f=>esc(f.name)).join(", ")}`:""}</div>
+    <p class="note-sm">Documents are private to the HR team and cannot be changed or deleted after upload. Download to view.</p>
+    <div id="wc-doc-status" aria-live="polite">${wcDocs.status?`<div class="banner ok">${esc(wcDocs.status)}</div>`:""}${wcDocs.error?`<div class="banner err">${esc(wcDocs.error)}</div>`:""}</div>`;
+}
+function renderWcDocsBox(){
+  const el=$("wc-docs-box");
+  if (el && wcDocs.caseId) el.innerHTML=wcDocsBoxHtml(wcDocs.caseId);
+}
+async function loadWcDocuments(caseId){
+  const ctx=wcDocsContext(caseId);
+  const seq=++wcDocs.seq;
+  const current=()=>ctx.sameIdentity() && seq===wcDocs.seq;
+  const prefix=`wc/${caseId}`, pageSize=100, files=[];
+  let listError="";
+  for (let offset=0; ; offset+=pageSize){
+    if (offset>=5000){ listError="More than 5,000 documents were found; narrow storage cleanup is required."; break; }
+    const result = await sb.storage.from("evidence").list(prefix,{limit:pageSize,offset,sortBy:{column:"created_at",order:"desc"}});
+    if (!current()) return;
+    if (result.error){ listError=errText(result.error); break; }
+    const page = result.data || [];
+    files.push(...page);
+    if (page.length < pageSize) break;
+  }
+  wcDocs.list=files; wcDocs.loaded=true; wcDocs.listError=listError;
+  if (ctx.visible()) renderWcDocsBox();
+}
+function wcSetFiles(input){
+  if (wcDocs.caseId!==wcSelected) return;
+  wcDocs.files=Array.from(input?.files||[]); wcDocs.status=""; wcDocs.error=""; wcDocs.retry=false;
+  // Patch in place — a #wc-docs-box repaint here would destroy the <input>
+  // mid-onchange and clear its native chosen-file label. A new selection
+  // replaces any retry queue (matching Legal), so the stale "Retry failed
+  // files" label and old banners must reset with it.
+  const staged=$("wc-staged-files");
+  if (staged) staged.textContent=wcDocs.files.length?`Selected for upload: ${wcDocs.files.map(f=>f.name).join(", ")}`:"";
+  const button=$("wc-upload-action");
+  if (button && !wcDocs.busy) button.textContent="Upload";
+  const status=$("wc-doc-status");
+  if (status) status.innerHTML="";
+}
+function setWcDocsBusy(active){
+  // Busy toggle patches only the button + status line: a full box repaint at
+  // busy-start would recreate the file input and visibly clear its native
+  // chosen-file label (mirrors setLegalActionBusy).
+  const button=$("wc-upload-action");
+  if (button){ button.disabled=active; button.setAttribute("aria-busy",String(active)); button.textContent=active?"Uploading…":(wcDocs.retry?"Retry failed files":"Upload"); }
+  const status=$("wc-doc-status");
+  if (active && status) status.innerHTML='<span class="note-sm">Uploading documents…</span>';
+}
+function finishWcUpload(ctx, failures, uploaded, paused=false){
+  wcDocs.busy=false; wcDocs.retry=wcDocs.files.length>0;
+  wcDocs.status=uploaded?`${uploaded} document${uploaded===1?"":"s"} uploaded successfully.`:"";
+  const messages=[];
+  if (failures.length) messages.push(`${failures.length} failed: ${failures.join("; ")}.`);
+  if (paused && wcDocs.files.length) messages.push(`Upload paused after leaving Workers' Comp; ${wcDocs.files.length} file${wcDocs.files.length===1?" remains":"s remain"} in the retry queue.`);
+  else if (failures.length) messages.push(`Select “Retry failed files” to retry only ${failures.length===1?"this file":"these files"}.`);
+  wcDocs.error=messages.join(" ");
+  if (ctx.visible()){ renderWcDocsBox(); if (uploaded) loadWcDocuments(wcDocs.caseId); }
+}
+async function wcUploadDocuments(caseId){
+  if (wcDocs.busy || wcDocs.caseId!==caseId) return;
+  const files=[...wcDocs.files];
+  if (!files.length) return;
+  const oversized=files.find(file=>file.size>25*1024*1024);
+  if (oversized){ wcDocs.error=`${oversized.name} is larger than the 25 MB limit.`; wcDocs.status=""; wcDocs.retry=false; renderWcDocsBox(); return; }
+  const ctx=wcDocsContext(caseId);
+  wcDocs.busy=true; wcDocs.error=""; wcDocs.status=""; setWcDocsBusy(true);
+  const failures=[];
+  let uploaded=0;
+  for (const file of files){
+    if (!ctx.sameIdentity()) return;
+    if (!ctx.visible()){ finishWcUpload(ctx,failures,uploaded,true); return; }
+    const storedName = legalUploadName(file.name);
+    const path = wcStoragePath(caseId,storedName);
+    if (!path){ failures.push(`${file.name}: document name could not be prepared safely`); continue; }
+    const { error } = await sb.storage.from("evidence").upload(path,file,{upsert:false,contentType:file.type||undefined});
+    if (!ctx.sameIdentity()) return;
+    if (error){ failures.push(`${file.name}: ${error.message||"unknown error"}`); continue; }
+    uploaded += 1;
+    wcDocs.files=wcDocs.files.filter(candidate=>candidate!==file);
+    if (!ctx.visible()){ finishWcUpload(ctx,failures,uploaded,true); return; }
+  }
+  if (!ctx.sameIdentity()) return;
+  finishWcUpload(ctx,failures,uploaded,false);
+}
+async function wcDownloadDocument(caseId, storedName, displayName){
+  const path = wcStoragePath(caseId,storedName);
+  if (!path){ alert("This document path is invalid."); return; }
+  const ctx=wcDocsContext(caseId);
+  const { data, error } = await sb.storage.from("evidence").download(path);
+  if (!ctx.visible()) return;
+  if (error || !data){ alert("Could not download this document: " + (error?.message||"unknown error")); return; }
+  downloadBlob(data,displayName||legalDocumentName(storedName));
+}
+function wcOpen(id){ wcDocs=blankWcDocs(id!=="new"?id:null); wcSelected = id; render(); if (id!=="new") loadWcDocuments(id); window.scrollTo({top:0,behavior:"smooth"}); }
+function wcClose(){ wcDocs=blankWcDocs(); wcSelected = null; render(); }
 async function wcSave(){
   const F = ["employee_name","employee_id","job_title","claim_number","location","us_state",
     "date_of_injury","date_reported","body_part","cause_nature","osha_recordable","injury_description",
@@ -1801,9 +1932,12 @@ async function wcSave(){
   for (const f of F) p[f] = ($("wc-"+f)?.value ?? "").trim();
   const err = m => { const el=$("wc-err"); el.innerHTML = `<div class="banner err">${esc(m)}</div>`; el.scrollIntoView({behavior:"smooth",block:"center"}); };
   if (!p.employee_name){ err("Employee name is required."); return; }
-  const { error } = await sb.rpc("wc_save", { p_id: wcSelected === "new" ? null : wcSelected, p });
+  const { data, error } = await sb.rpc("wc_save", { p_id: wcSelected === "new" ? null : wcSelected, p });
   if (error){ err(errText(error)); return; }
-  wcSelected = null; render();
+  // A freshly created claim reopens in the editor so documents can be attached
+  // immediately instead of hunting for the new row in the list (QC 9/16).
+  if (wcSelected === "new" && data?.id){ wcOpen(data.id); return; }
+  wcDocs = blankWcDocs(); wcSelected = null; render();
 }
 
 // ---------- LEGAL & CLAIMS TRACKER (source workbook spec, 8/18) -----------
