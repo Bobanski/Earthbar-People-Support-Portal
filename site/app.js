@@ -826,11 +826,22 @@ async function boot(){
     session = s;
     if(s){
       const expected = nextUserId;
-      loadContext().then(()=>{ if(session?.user?.id === expected) render(); });
-    } else { clearAllAuthStorage(); render(); }
+      loadContext().then(()=>{ if(session?.user?.id === expected && !applyInitialRoute()) render(); });
+    } else {
+      clearAllAuthStorage();
+      // Keep the deep link armed so signing back in lands on the same page.
+      initialRoutePending = location.hash.startsWith("#/");
+      render();
+    }
+  });
+  window.addEventListener("hashchange", () => {
+    if (routeApplying || !session || medicalInviteToken) return;
+    if (!location.hash.startsWith("#/")) return;
+    if (location.hash === "#" + currentRoute()) return;
+    applyRoute();
   });
   if (session) { touchLastSeen(); await loadContext(); }
-  render();
+  if (!session || !applyInitialRoute()) render();
   // re-check whenever the tab is brought back to the front
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState !== "visible") return;
@@ -920,7 +931,77 @@ function go(v){
   view=v; clearSelectedCaseState(); receipt=null; errorMsg=""; showManual=false;
   if(v!=="dashboard"){ setLegalPreviewBackgroundInert(false); legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; }
   if(v==="status"){ myReportsError=""; myReportsLoading=true; myReportsLoaded=false; }
-  render();
+  render(); syncRoute();
+}
+
+// ---------------- HASH ROUTES ----------------
+// Deep links so a refresh restores the page being viewed (Eitan 2026-09-16):
+// #/home|status|incident|request|lookup, #/dashboard/<tab>,
+// #/dashboard/<tab>/case/<uuid>, #/dashboard/wc/<uuid>, #/dashboard/legal/<uuid>.
+// Hash-based on purpose — works on GitHub Pages today and any static host
+// later, no server rewrites. The bare "#key=value" form stays reserved for
+// the medical-return invite token (takeMedicalInviteToken strips it at load;
+// routes always start with "#/"). Navigation functions call syncRoute(),
+// which collapses same-tick updates into one hash write; hashchange (back /
+// forward / hand-edited URL) re-applies through the SAME nav functions so
+// draft-flush and state-reset invariants hold. New-entry forms (wc/legal
+// "new") deliberately have no route — a refresh must not resurrect a blank
+// form over typed, unsaved fields.
+// Loose on purpose: ids only ever reach parameterized .eq("id",…) queries and
+// esc()'d DOM; a junk id just renders that view's own not-found state.
+const ROUTE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const ROUTE_DASH_VIEWS = ["cases","requests","closed","wc","legal"];
+let routeApplying = false, routeSyncQueued = false;
+let initialRoutePending = location.hash.startsWith("#/");
+function currentRoute(){
+  if (view === "dashboard"){
+    if (selected) return `/dashboard/${dashView}/case/${selected}`;
+    if (dashView === "wc" && wcSelected && wcSelected !== "new") return `/dashboard/wc/${wcSelected}`;
+    if (dashView === "legal" && lgSelected && lgSelected !== "new") return `/dashboard/legal/${lgSelected}`;
+    return `/dashboard/${dashView}`;
+  }
+  return "/" + view;
+}
+function syncRoute(){
+  if (routeApplying || routeSyncQueued || !session || medicalInviteToken) return;
+  routeSyncQueued = true;
+  queueMicrotask(() => {
+    routeSyncQueued = false;
+    if (routeApplying || !session || medicalInviteToken) return;
+    const target = "#" + currentRoute();
+    if (location.hash !== target) location.hash = target;
+  });
+}
+function applyRoute(){
+  if (!session || medicalInviteToken || !location.hash.startsWith("#/")) return false;
+  const parts = location.hash.slice(2).split("/").filter(Boolean);
+  routeApplying = true;
+  try {
+    const head = parts[0] || "home";
+    if (head === "dashboard"){
+      const dv = ROUTE_DASH_VIEWS.includes(parts[1]) ? parts[1] : "cases";
+      go("dashboard");
+      if (view === "dashboard"){               // go() falls back to home for non-handlers
+        setDashView(dv);
+        // "new" never appears in a generated route (blank draft forms have no
+        // deep link); a hand-typed /new URL self-heals via the replaceState below.
+        const routeId = p => p && p !== "new" && ROUTE_ID.test(p);
+        if (parts[2] === "case" && routeId(parts[3])) openCase(parts[3]);
+        else if (dv === "wc" && routeId(parts[2])) wcOpen(parts[2]);
+        else if (dv === "legal" && routeId(parts[2])) lgOpen(parts[2]);
+      }
+    }
+    else if (["home","status","incident","request","lookup"].includes(head)) go(head);
+    else go("home");
+  } finally { routeApplying = false; }
+  // Normalize without adding a history entry (bad ids, non-handler fallbacks).
+  history.replaceState(history.state, "", location.pathname + location.search + "#" + currentRoute());
+  return true;
+}
+function applyInitialRoute(){
+  if (!initialRoutePending) return false;
+  initialRoutePending = false;
+  return applyRoute();
 }
 function renderNav(){
   $("nav").innerHTML = session && !medicalInviteToken ? tabs().map(t=>`<button class="${view===t.id?'active':''}" onclick="go('${t.id}')">${t.label}</button>`).join("") : "";
@@ -1284,7 +1365,7 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1920,8 +2001,8 @@ async function wcDownloadDocument(caseId, storedName, displayName){
   if (error || !data){ alert("Could not download this document: " + (error?.message||"unknown error")); return; }
   downloadBlob(data,displayName||legalDocumentName(storedName));
 }
-function wcOpen(id){ wcDocs=blankWcDocs(id!=="new"?id:null); wcSelected = id; render(); if (id!=="new") loadWcDocuments(id); window.scrollTo({top:0,behavior:"smooth"}); }
-function wcClose(){ wcDocs=blankWcDocs(); wcSelected = null; render(); }
+function wcOpen(id){ wcDocs=blankWcDocs(id!=="new"?id:null); wcSelected = id; render(); syncRoute(); if (id!=="new") loadWcDocuments(id); window.scrollTo({top:0,behavior:"smooth"}); }
+function wcClose(){ wcDocs=blankWcDocs(); wcSelected = null; render(); syncRoute(); }
 async function wcSave(){
   const F = ["employee_name","employee_id","job_title","claim_number","location","us_state",
     "date_of_injury","date_reported","body_part","cause_nature","osha_recordable","injury_description",
@@ -1937,7 +2018,7 @@ async function wcSave(){
   // A freshly created claim reopens in the editor so documents can be attached
   // immediately instead of hunting for the new row in the list (QC 9/16).
   if (wcSelected === "new" && data?.id){ wcOpen(data.id); return; }
-  wcDocs = blankWcDocs(); wcSelected = null; render();
+  wcDocs = blankWcDocs(); wcSelected = null; render(); syncRoute();
 }
 
 // ---------- LEGAL & CLAIMS TRACKER (source workbook spec, 8/18) -----------
@@ -2554,8 +2635,8 @@ function lgEditor(r){
 }
 function blankLegalComposer(caseId=null){ return {caseId,note:"",files:[],status:"",error:"",noteError:"",retry:false}; }
 function blankLegalPreview(){ return {open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; }
-function lgOpen(id){ closeAttachmentPreview(false); lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalLinkPicker={caseId:id==="new"?null:id,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function lgClose(){ closeAttachmentPreview(false); lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); }
+function lgOpen(id){ closeAttachmentPreview(false); lgSelected = id; lgEditing = id === "new"; legalComposer=blankLegalComposer(id==="new"?null:id); legalLinkPicker={caseId:id==="new"?null:id,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); syncRoute(); window.scrollTo({top:0,behavior:"smooth"}); }
+function lgClose(){ closeAttachmentPreview(false); lgSelected = null; lgEditing = false; legalComposer=blankLegalComposer(); legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalBusy={note:false,upload:false}; legalPreview=blankLegalPreview(); legalPreviewGeneration+=1; render(); syncRoute(); }
 function lgEdit(){ if(lgSelected && lgSelected!=="new"){ lgEditing=true; render(); } }
 function lgCancelEdit(){ if(lgSelected==="new") lgClose(); else { lgEditing=false; render(); } }
 async function lgSave(){
@@ -2583,7 +2664,7 @@ async function lgSave(){
   const { error } = await sb.rpc("legal_save", { p_id: lgSelected === "new" ? null : lgSelected, p });
   if (error){ err(errText(error)); return; }
   if (lgSelected === "new") lgSelected = null;
-  lgEditing = false; render();
+  lgEditing = false; render(); syncRoute();
 }
 function legalStoragePath(caseId, storedName){
   const id = String(caseId||"");
@@ -2916,8 +2997,8 @@ function clearSelectedCaseState(){
   partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
   medicalPanel=blankMedicalPanel();
 }
-function openCase(id){ closeAttachmentPreview(false); clearSelectedCaseState(); selected=id; render(); window.scrollTo({top:0,behavior:"smooth"}); }
-function closeCase(){ closeAttachmentPreview(false); clearSelectedCaseState(); render(); }
+function openCase(id){ closeAttachmentPreview(false); clearSelectedCaseState(); selected=id; render(); syncRoute(); window.scrollTo({top:0,behavior:"smooth"}); }
+function closeCase(){ closeAttachmentPreview(false); clearSelectedCaseState(); render(); syncRoute(); }
 
 // ---- manual case entry (for reports that reach People Support by email) ---
 // Everything typed here is mirrored into `manual` and auto-saved to sessionStorage
@@ -3398,26 +3479,25 @@ async function savePartyEdit(){
 
 // T136 fix pass + change flow: set/change control for the structured
 // requester on any named request — manual entries AND portal submissions
-// (widened 2026-09-16 evening; HR files most requests through the portal
-// form signed in as themselves, so those rows carried no requester). No
-// recorded requester (e.g. the post-submit set_case_requester call failed,
-// or the request predates T136) auto-opens the recovery lookup; a recorded
-// requester collapses to a "Change" button on the requester line so HR can
-// correct a wrong pick. Handler-only by construction (the case detail view
-// is dashboard-scoped); set_case_requester re-checks authorization and the
-// named/request gates server-side (migration 20260916210000). Reuses the
-// shared lookup component; picking (re-)issues set_case_requester. Scoped
-// repaints only — never a full render() from inside this control.
+// (widened 2026-09-16 evening). Restyled 2026-09-16 late to match the Case
+// Owner "Reassign" pattern (Eitan): the requester line always carries a
+// compact button — "Assign" when no requester is recorded, "Reassign" when
+// one is — and the lookup box opens only on demand; nothing auto-opens.
+// Handler-only by construction (the case detail view is dashboard-scoped);
+// set_case_requester re-checks authorization and the named/request gates
+// server-side (migration 20260916210000). Reuses the shared lookup
+// component; picking (re-)issues set_case_requester. Scoped repaints only —
+// never a full render() from inside this control.
 let cdRequester = { caseId:null, err:"", busy:false, open:false };
 const cdRequesterEligible = c => c.intake_type === "request" && !c.anonymous;
 function cdRequesterState(c){
-  if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false, open:!c.requester_id };
+  if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false, open:false };
   return cdRequester;
 }
 function cdRequesterHtml(c){
   if (!cdRequesterEligible(c)) return "";
   const st = cdRequesterState(c);
-  if (c.requester_id && !st.open) return "";
+  if (!st.open) return "";
   registerEmployeeLookup("cd-requester", {
     ariaLabel: c.requester_id ? "Search employees to change the requester" : "Search employees to set the requester",
     placeholder: c.requester_id ? "Search the directory for the new requester…" : "Search the directory to set the requester…",
@@ -3434,13 +3514,13 @@ function cdRequesterHtml(c){
   </span></div>`;
 }
 function cdRequesterToggleHtml(c){
-  if (!cdRequesterEligible(c) || !c.requester_id) return "";
+  if (!cdRequesterEligible(c)) return "";
   const st = cdRequesterState(c);
-  return `<button id="cd-requester-toggle" class="btn sm ghost" style="margin-left:8px" onclick="toggleCdRequester()" ${st.busy?'disabled':''}>${st.open?'Cancel':'Change'}</button>`;
+  return `<button id="cd-requester-toggle" class="btn sm ghost" style="margin-left:8px" onclick="toggleCdRequester()" ${st.busy?'disabled':''}>${st.open?'Cancel':(c.requester_id?'Reassign':'Assign')}</button>`;
 }
 function toggleCdRequester(){
   const c = caseExport?.c;
-  if (!c || !cdRequesterEligible(c) || !c.requester_id) return;
+  if (!c || !cdRequesterEligible(c)) return;
   const st = cdRequesterState(c);
   if (st.busy) return;
   st.open = !st.open; st.err = "";
