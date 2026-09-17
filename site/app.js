@@ -3397,17 +3397,19 @@ async function savePartyEdit(){
 }
 
 // T136 fix pass + change flow: set/change control for the structured
-// requester on a manual, named request. No recorded requester (e.g. the
-// post-submit set_case_requester call failed, or the request predates T136)
-// auto-opens the recovery lookup; a recorded requester collapses to a
-// "Change" button on the requester line so HR can correct a wrong pick.
-// Handler-only by construction (the case detail view is dashboard-scoped);
-// set_case_requester re-checks authorization and the manual/named/request
-// gates server-side. Reuses the shared lookup component; picking
-// (re-)issues set_case_requester. Scoped repaints only — never a full
-// render() from inside this control.
+// requester on any named request — manual entries AND portal submissions
+// (widened 2026-09-16 evening; HR files most requests through the portal
+// form signed in as themselves, so those rows carried no requester). No
+// recorded requester (e.g. the post-submit set_case_requester call failed,
+// or the request predates T136) auto-opens the recovery lookup; a recorded
+// requester collapses to a "Change" button on the requester line so HR can
+// correct a wrong pick. Handler-only by construction (the case detail view
+// is dashboard-scoped); set_case_requester re-checks authorization and the
+// named/request gates server-side (migration 20260916210000). Reuses the
+// shared lookup component; picking (re-)issues set_case_requester. Scoped
+// repaints only — never a full render() from inside this control.
 let cdRequester = { caseId:null, err:"", busy:false, open:false };
-const cdRequesterEligible = c => c.intake_type === "request" && c.manual_entry && !c.anonymous;
+const cdRequesterEligible = c => c.intake_type === "request" && !c.anonymous;
 function cdRequesterState(c){
   if (cdRequester.caseId !== c.id) cdRequester = { caseId:c.id, err:"", busy:false, open:!c.requester_id };
   return cdRequester;
@@ -3423,8 +3425,8 @@ function cdRequesterHtml(c){
     onPick: d => setCaseRequesterFromDetail(c.id, d.employee_id),
   });
   const note = c.requester_id
-    ? "Picking an employee replaces the recorded requester. The notification email on file is unchanged."
-    : "No structured requester is recorded — the dashboard's Requester column and search won't reflect this request until one is set.";
+    ? "Picking an employee replaces the recorded requester. Status emails keep going to the address the request was submitted with — not to the new requester."
+    : "No structured requester is recorded — the dashboard's Requester column and search won't reflect this request until one is set. Status emails keep going to the address the request was submitted with.";
   return `<div id="cd-requester-box" class="kv"><span class="k">${c.requester_id?"Change requester":"Set requester"}</span><span style="flex:1;min-width:240px">
     ${st.busy ? '<span class="muted"><span class="spin"></span> Recording requester…</span>' : employeeLookupHtml("cd-requester")}
     <p class="note-sm" style="margin-top:4px">${note}</p>
