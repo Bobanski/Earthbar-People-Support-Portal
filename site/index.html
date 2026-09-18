@@ -190,6 +190,9 @@
   .th-sort:hover{color:var(--ink)}
   th[aria-sort="ascending"] .th-sort,th[aria-sort="descending"] .th-sort{color:var(--ink)}
   .sort-ind{font-size:8px;line-height:1;min-width:8px}
+  /* The 12-column WC / 10-column Legal tables fit their card only when header
+     labels can wrap, as the plain th text did before they became sortable. */
+  #wc-table-head .th-sort,#legal-table-head .th-sort{white-space:normal;text-align:left}
   /* T136: shared employee lookup (requests requester, legal, accommodations) */
   .emp-lookup{margin-bottom:6px}
   .el-clear{appearance:none;border:0;background:transparent;color:var(--red);font:inherit;font-weight:700;cursor:pointer;padding:2px 5px;margin:-2px -4px -2px 2px;border-radius:5px}
