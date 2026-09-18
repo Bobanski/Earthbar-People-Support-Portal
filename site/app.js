@@ -492,8 +492,8 @@ function resetSessionState(preserveMedicalInvite=false){
   for (const key of Object.keys(employeeLookups)) employeeLookups[key].query = "";
   pendingAdvance = null; showFilters = false; showGuide = false; showReassign = false;
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
-  wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = [];
-  lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = [];
+  wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = []; wcSort = { key:"", dir:1 };
+  lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = []; lgSort = { key:"", dir:1 };
   lgEditing = false; legalDetail = { notes:[], files:[], errors:[] };
   legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false }; legalBusy = { note:false, upload:false };
   legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1;
@@ -757,7 +757,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   openCase, closeCase, doAdvance, sendHandlerMsg, doStatusCheck, sendReporterReply, openNamedReportMessages,
   setFilter, applyFilters, toggleFilters, clearDashboardFilter, clearDashboardFilters, setDashboardQuickFilter, setDashSort, toggleMyWork, toggleManual, setM, setManualLocation, mAddParty, mRmParty, mOnPartyInput, mPickPartyEmp, submitManual, submitManualRequest, discardManualDraft,
   elInput, elKeyDown, elPickResult, elClear, toggleCdRequester,
-  wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters,
+  wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters, setWcSort, setLegalSort,
   wcSetFiles, wcUploadDocuments, wcDownloadDocument,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
@@ -1365,7 +1365,7 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; wcSort={ key:"", dir:1 }; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgSort={ key:"", dir:1 }; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1686,6 +1686,59 @@ function trackerChipsHtml(entries, clearFn){
     `<button type="button" class="filter-chip" aria-label="Remove ${esc(label)} filter" onclick="${clearFn}('${key}')"><span>${esc(label)}</span><span class="filter-chip-x" aria-hidden="true">×</span></button>`
   ).join("")}`;
 }
+// Sortable headers for the Workers' Comp and Legal tabs — same model as the
+// cases/requests/closed tabs (T136): click toggles asc/desc, accent-insensitive
+// string compare, ref as the stable tie-break, sort cleared on tab switch.
+// A column with a falsy key (Legal "Docs") renders as a plain, unsortable th.
+function trackerCompare(sort, vals){
+  return (a, b) => {
+    const value = vals[sort.key];
+    const va = value(a), vb = value(b);
+    const cmp = (typeof va === "number" && typeof vb === "number")
+      ? va - vb
+      : String(va).localeCompare(String(vb), undefined, { sensitivity:"base" });
+    return (cmp || String(a.ref || a.id).localeCompare(String(b.ref || b.id))) * sort.dir;
+  };
+}
+// Repaints patch the existing th's in place (like updateDashboardResults) —
+// rebuilding the thead would tear out a focused header button mid-keyboard use.
+function patchTrackerHead(rowId, sort){
+  document.querySelectorAll(`#${rowId} th[data-sort-key]`).forEach(th => {
+    const active = sort.key === th.dataset.sortKey;
+    th.setAttribute("aria-sort", active ? (sort.dir===1?"ascending":"descending") : "none");
+    const ind = th.querySelector(".sort-ind");
+    if (ind) ind.textContent = active ? (sort.dir===1?"▲":"▼") : "";
+  });
+}
+function trackerHeadHtml(columns, sort, setFnName){
+  return columns.map(([key,label], i) => {
+    if (!key) return `<th${i===0?' style="padding-left:20px"':''}>${esc(label)}</th>`;
+    const active = sort.key === key;
+    return `<th data-sort-key="${key}" aria-sort="${active?(sort.dir===1?'ascending':'descending'):'none'}"${i===0?' style="padding-left:20px"':''}><button type="button" class="th-sort" onclick="${setFnName}('${key}')">${esc(label)}<span class="sort-ind" aria-hidden="true">${active?(sort.dir===1?'▲':'▼'):''}</span></button></th>`;
+  }).join("");
+}
+let wcSort = { key:"", dir:1 };
+const WC_SORT_VALS = {
+  ref: w => w.ref || "",
+  employee: w => w.employee_name || "",
+  loc: w => (w.location || "") + (w.us_state ? ", " + w.us_state : ""),
+  injury: w => Date.parse(w.date_of_injury || "") || 0,
+  body: w => w.body_part || "",
+  type: w => w.claim_type || "",
+  status: w => w.claim_status || "",
+  work: w => w.work_status || "",
+  incurred: w => Number(w.total_incurred) || 0,
+  asg: w => w.assigned_to || "",
+  followup: w => Date.parse(w.next_follow_up || "") || 0,
+  days: w => wcDays(w.date_reported || (w.created_at||"").slice(0,10), w.date_closed || todayStr()) ?? -1,
+};
+const WC_COLUMNS = [["ref","Case ID"],["employee","Employee"],["loc","Location"],["injury","Injury / Reported"],["body","Body part"],["type","Claim type"],["status","Status"],["work","Work status"],["incurred","Incurred"],["asg","Assigned"],["followup","Next follow-up"],["days","Days open"]];
+function setWcSort(key){
+  if (!WC_SORT_VALS[key]) return;
+  if (wcSort.key === key) wcSort.dir = -wcSort.dir;
+  else wcSort = { key, dir:1 };
+  updateWcResults();
+}
 function wcModel(){
   const q = wcFilters.q.trim().toLowerCase();
   const shown = wcData.filter(w =>
@@ -1699,6 +1752,7 @@ function wcModel(){
       (wcFilters.quick === "osha" && w.osha_recordable === "Yes")) &&
     (!q || [w.ref, w.employee_name, w.claim_number, w.injury_description, w.location]
       .some(v => (v||"").toLowerCase().includes(q))));
+  if (wcSort.key && WC_SORT_VALS[wcSort.key]) shown.sort(trackerCompare(wcSort, WC_SORT_VALS));
   return { rows:wcData, shown, todayS:todayStr() };
 }
 function wcRowsHtml({shown,todayS}){
@@ -1732,6 +1786,7 @@ function syncWcFilterInputs(){
 }
 function updateWcResults(){
   const model = wcModel();
+  patchTrackerHead("wc-table-head", wcSort);
   if ($("wc-table-body")) $("wc-table-body").innerHTML = wcRowsHtml(model);
   if ($("wc-result-count")) $("wc-result-count").textContent = `Showing ${model.shown.length} of ${model.rows.length} claims`;
   if ($("wc-active-filters")) $("wc-active-filters").innerHTML = wcFilterChipsHtml();
@@ -1804,7 +1859,7 @@ async function renderWcInto(el){
     </div>
     ${wcSelected ? wcEditor(sel) : ""}
     <div class="card" style="padding:8px 0;overflow-x:auto"><table>
-      <thead><tr><th style="padding-left:20px">Case ID</th><th>Employee</th><th>Location</th><th>Injury / Reported</th><th>Body part</th><th>Claim type</th><th>Status</th><th>Work status</th><th>Incurred</th><th>Assigned</th><th>Next follow-up</th><th>Days open</th></tr></thead>
+      <thead><tr id="wc-table-head">${trackerHeadHtml(WC_COLUMNS, wcSort, "setWcSort")}</tr></thead>
       <tbody id="wc-table-body">${wcRowsHtml(model)}</tbody>
     </table></div>`;
 }
@@ -2046,6 +2101,25 @@ function lgDocsCell(v){
   if (!urls) return `<span class="muted">${esc(v)}</span>`;
   return urls.map((u,i)=>`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">Folder${urls.length>1?" "+(i+1):""}</a>`).join(", ");
 }
+let lgSort = { key:"", dir:1 };
+const LG_SORT_VALS = {
+  ref: r => r.ref || "",
+  risk: r => ({High:0,Medium:1,Low:2}[r.risk_level] ?? 3),
+  status: r => r.status || "",
+  complainant: r => r.complainant || "",
+  type: r => r.claim_type || "",
+  opposing: r => r.opposing_counsel || "",
+  company: r => r.company_counsel || "",
+  ebpoint: r => r.eb_point || "",
+  due: r => Date.parse(r.due_date || "") || 0,
+};
+const LG_COLUMNS = [["ref","Case ID"],["risk","Risk"],["status","Status"],["complainant","Complainant"],["type","Type"],["opposing","Opposing counsel / agency"],["company","Company counsel"],["ebpoint","EB point"],["due","Due date"],["","Docs"]];
+function setLegalSort(key){
+  if (!LG_SORT_VALS[key]) return;
+  if (lgSort.key === key) lgSort.dir = -lgSort.dir;
+  else lgSort = { key, dir:1 };
+  updateLegalResults();
+}
 function legalModel(){
   const q = lgFilters.q.trim().toLowerCase();
   const shown = legalData.filter(r =>
@@ -2060,6 +2134,7 @@ function legalModel(){
       (lgFilters.quick === "due" && lgDue(r))) &&
     (!q || [r.ref, r.complainant, r.opposing_counsel, r.company_counsel, r.eb_point,
       r.synopsis, r.pending_action, r.epli_notes, r.notes, r.violation_description].some(v => (v||"").toLowerCase().includes(q))));
+  if (lgSort.key && LG_SORT_VALS[lgSort.key]) shown.sort(trackerCompare(lgSort, LG_SORT_VALS));
   return { rows:legalData, shown };
 }
 function legalRowsHtml({shown}){
@@ -2087,6 +2162,7 @@ function syncLegalFilterInputs(){
 }
 function updateLegalResults(){
   const model = legalModel();
+  patchTrackerHead("legal-table-head", lgSort);
   if ($("legal-table-body")) $("legal-table-body").innerHTML = legalRowsHtml(model);
   if ($("legal-result-count")) $("legal-result-count").textContent = `Showing ${model.shown.length} of ${model.rows.length} legal cases`;
   if ($("legal-active-filters")) $("legal-active-filters").innerHTML = legalFilterChipsHtml();
@@ -2217,7 +2293,7 @@ async function renderLegalInto(el){
       <div id="legal-active-filters" class="active-filter-list" aria-live="polite">${legalFilterChipsHtml()}</div>
     </div>
     <div class="card" style="padding:8px 0;overflow-x:auto"><table>
-      <thead><tr><th style="padding-left:20px">Case ID</th><th>Risk</th><th>Status</th><th>Complainant</th><th>Type</th><th>Opposing counsel / agency</th><th>Company counsel</th><th>EB point</th><th>Due date</th><th>Docs</th></tr></thead>
+      <thead><tr id="legal-table-head">${trackerHeadHtml(LG_COLUMNS, lgSort, "setLegalSort")}</tr></thead>
       <tbody id="legal-table-body">${legalRowsHtml(model)}</tbody>
     </table></div>`;
 }
