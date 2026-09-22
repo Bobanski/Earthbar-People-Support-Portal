@@ -2024,7 +2024,7 @@ function wcDocsBoxHtml(caseId){
   const docs = !wcDocs.loaded ? '<span class="muted">Loading documents…</span>'
     : wcDocs.list.length ? wcDocs.list.map(f=>{
         const display = legalDocumentName(f.name);
-        return `<div class="task"><span><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+        return `<div class="task"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
           <span style="margin-left:auto"><button class="btn sm ghost" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="wcDownloadDocument('${esc(caseId)}',this.dataset.p,this.dataset.n)">Download</button></span></div>`;
       }).join("") : '<span class="muted">No documents uploaded.</span>';
   return `${wcDocs.listError?`<div class="banner warn">${esc(wcDocs.listError)}</div>`:""}
@@ -2085,7 +2085,7 @@ function finishWcUpload(ctx, failures, uploaded, paused=false){
   const messages=[];
   if (failures.length) messages.push(`${failures.length} failed: ${failures.join("; ")}.`);
   if (paused && wcDocs.files.length) messages.push(`Upload paused after leaving Workers' Comp; ${wcDocs.files.length} file${wcDocs.files.length===1?" remains":"s remain"} in the retry queue.`);
-  else if (failures.length) messages.push(`Select “Retry failed files” to retry only ${failures.length===1?"this file":"these files"}.`);
+  else if (failures.length && wcDocs.files.length) messages.push(`Select “Retry failed files” to retry only ${wcDocs.files.length===1?"this file":"these files"}.`);
   wcDocs.error=messages.join(" ");
   if (ctx.visible()){ renderWcDocsBox(); if (uploaded) loadWcDocuments(wcDocs.caseId); }
 }
@@ -2103,6 +2103,7 @@ async function wcUploadDocuments(caseId){
     if (!ctx.sameIdentity()) return;
     if (!ctx.visible()){ finishWcUpload(ctx,failures,uploaded,true); return; }
     const storedName = legalUploadName(file.name);
+    if (!storedName){ failures.push(`${file.name}: filename is too long for safe storage; shorten it and choose it again`); wcDocs.files=wcDocs.files.filter(candidate=>candidate!==file); continue; }
     const path = wcStoragePath(caseId,storedName);
     if (!path){ failures.push(`${file.name}: document name could not be prepared safely`); continue; }
     const { error } = await sb.storage.from("evidence").upload(path,file,{upsert:false,contentType:file.type||undefined});
@@ -2365,7 +2366,15 @@ async function renderLegalInto(el){
       <tbody id="legal-table-body">${legalRowsHtml(model)}</tbody>
     </table></div>`;
 }
-const legalDocumentName = name => String(name||"").replace(/^[0-9a-f-]{36}_/i,"");
+function legalDocumentName(name){
+  const stored=String(name||"");
+  const encoded=stored.match(/^e_[A-Za-z0-9-]+_(.*)$/);
+  if (encoded){
+    try { return decodeURIComponent(encoded[1].replace(/_([0-9A-F]{2})/gi,"%$1")); }
+    catch { return stored; }
+  }
+  return stored.replace(/^[0-9a-f-]{36}_/i,"");
+}
 async function listLegalDocuments(caseId, isCurrent=()=>true){
   const prefix = `legal/${caseId}`;
   const pageSize = 100;
@@ -2454,7 +2463,7 @@ function lgSummary(r){
   const docs = legalDetail.files.length ? legalDetail.files.map(f=>{
     const display = legalDocumentName(f.name);
     const kind = legalDocumentKind(display);
-    return `<div class="task"><span><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+    return `<div class="task"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
       <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
         ${kind!=="download"?`<button class="btn sm sec" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgPreviewDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Preview</button>`:""}
         <button class="btn sm ghost" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgDownloadDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Download</button>
@@ -2817,9 +2826,15 @@ function legalStoragePath(caseId, storedName){
   return `legal/${id}/${name}`;
 }
 function legalUploadName(fileName){
-  const cleaned = String(fileName||"document").replace(/[\\/\x00-\x1f\x7f]/g,"_").slice(-180) || "document";
+  const original=String(fileName||"document");
   const unique = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${unique}_${cleaned}`;
+  // Supabase rejects [] and other characters in object keys. Encode only
+  // names needing it, so the original remains available for display/download
+  // without a separate metadata query (Storage list omits custom metadata).
+  if (/^[A-Za-z0-9_.' ,!*&$@=;:+?()\-]+$/.test(original)) return `${unique}_${original.slice(-180)}`;
+  const encoded=Array.from(original, char=>/^[A-Za-z0-9.' ,!*&$@=;:+?()\-]$/.test(char)
+    ? char : Array.from(new TextEncoder().encode(char),byte=>`_${byte.toString(16).padStart(2,"0").toUpperCase()}`).join("")).join("");
+  return encoded.length<=700 ? `e_${unique}_${encoded}` : null;
 }
 function legalActionContext(caseId){
   const epoch=sessionEpoch, userId=session?.user?.id;
@@ -2861,7 +2876,7 @@ function finishLegalUpload(ctx, failures, uploaded, paused=false){
   const messages=[];
   if(failures.length) messages.push(`${failures.length} failed: ${failures.join("; ")}.`);
   if(paused && legalComposer.files.length) messages.push(`Upload paused after leaving Legal & Claims; ${legalComposer.files.length} file${legalComposer.files.length===1?" remains":"s remain"} in the retry queue.`);
-  else if(failures.length) messages.push(`Select “Retry failed files” to retry only ${failures.length===1?"this file":"these files"}.`);
+  else if(failures.length && legalComposer.files.length) messages.push(`Select “Retry failed files” to retry only ${legalComposer.files.length===1?"this file":"these files"}.`);
   legalComposer.error=messages.join(" ");
   if(ctx.visible()) render();
 }
@@ -2879,6 +2894,7 @@ async function lgUploadDocuments(caseId){
     if (!ctx.sameIdentity()) return;
     if (!ctx.visible()){ finishLegalUpload(ctx,failures,uploaded,true); return; }
     const storedName = legalUploadName(file.name);
+    if (!storedName){ failures.push(`${file.name}: filename is too long for safe storage; shorten it and choose it again`); legalComposer.files=legalComposer.files.filter(candidate=>candidate!==file); continue; }
     const path = legalStoragePath(caseId,storedName);
     if (!path){ failures.push(`${file.name}: document name could not be prepared safely`); continue; }
     const { error } = await sb.storage.from("evidence").upload(path,file,{upsert:false,contentType:file.type||undefined});
