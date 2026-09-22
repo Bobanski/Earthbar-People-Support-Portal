@@ -319,9 +319,9 @@ const ACC_DURATION = ["Temporary","Ongoing"];
 // and every move is written to the audit log regardless.
 const REQ_STATES = ["Assigned","UnderReview","AwaitingInformation","InInteractiveProcess","Monitoring"];
 // --- Workers' Comp tracker (source workbook spec, 2026-08-21) ---
-// Dropdown values come from the workbook's "Lists" tab, verbatim.
-const WC_MARKETS = ["Berkeley","San Francisco","San Diego / Carlsbad","New York City","Seattle","Washington DC","Mamaroneck NY","Armonk NY","Darien CT","Fairfield CT","Collegeville PA","Boston MA"];
-const WC_STATES = ["CA","NY","WA","DC","CT","PA","MA"];
+// Dropdown values start with the workbook's "Lists" tab and include HR-requested additions (Flora, 2026-09-21).
+const WC_MARKETS = ["Berkeley","San Francisco","San Diego / Carlsbad","New York City","Seattle","Washington DC","Mamaroneck NY","Armonk NY","Darien CT","Fairfield CT","Collegeville PA","Boston MA","Dallas TX","Los Angeles CA"];
+const WC_STATES = ["CA","NY","WA","DC","CT","PA","MA","FL","GA","MD","MI","NJ","TX","VA"];
 const WC_OSHA = ["Yes","No","TBD"];
 const WC_CLAIM_TYPES = ["Medical Only","Lost Time / Indemnity","Report Only","Denied"];
 const WC_CLAIM_STATUS = ["Open","Investigating","Pending","Litigation","Closed","Denied"];
