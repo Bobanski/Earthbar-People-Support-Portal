@@ -380,6 +380,10 @@ const CUSTOM_PERIOD = "__custom";
 
 // ---- state ----
 let session = null, me = null, isHandler = false, isAdmin = false, signedOutReason = "", trustedDeviceNotice = "";
+// A guided real-case exercise, not a different identity or authorization role.
+let employeeTest = false, employeeTestReceipt = null;
+let statusLookupGeneration = 0;
+const EMPLOYEE_TEST_PREFIX = "[TEST ONLY — employee portal exercise]";
 let dirList = [], dirMap = {}, storeList = [], stateMap = {}, statesList = [], dirLoaded = false;
 let view = "home", selected = null, busy = false, errorMsg = "";
 let auth = { email:"", sent:false, err:"", remember:false };
@@ -470,6 +474,7 @@ async function medicalAction(body){
 function verifiedEmail(){ return (session?.user?.email || "").trim().toLowerCase(); }
 function canUseDirectorySearch(){ return !!session; }
 function resetSessionState(preserveMedicalInvite=false){
+  employeeTest = false; employeeTestReceipt = null;
   statementTemplatePromise=null; clearStatementTemplate();
   setLegalPreviewBackgroundInert(false);
   closeAttachmentPreview(false);
@@ -613,7 +618,9 @@ function employeeMatches(query, limit = 8){
   if (q.length < 2) return [];
   return dirList.filter(d => normSearch(d.name).includes(q)
     || normSearch(d.title).includes(q)
-    || normSearch(d.employee_id).startsWith(q)).slice(0, limit);
+    || normSearch(d.employee_id).startsWith(q)
+    || normSearch(d.employee_number).startsWith(q)
+    || (Array.isArray(d.search_names) && d.search_names.some(n=>normSearch(n).includes(q)))).slice(0, limit);
 }
 const employeeLookups = {};   // instance id -> { query, activeIndex, placeholder, getSelected, onPick, onClear }
 // Hosts re-register on every render so callbacks close over current state;
@@ -747,6 +754,7 @@ function elClear(id){
 Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setRememberDevice,
   setF, setIncidentLocation, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
+  startEmployeeTest, endEmployeeTest, openEmployeeTestStatus,
   setDashView, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
@@ -858,7 +866,9 @@ async function loadContext(){
   const nextIsAdmin = !!a.data, nextIsHandler = !!h.data;
   let dir = [];
   if (nextIsHandler) {
-    const result = await sb.from("directory").select("employee_id,name,email,title,store,manager_id");
+    let result = await sb.from("directory").select("employee_id,name,email,title,store,manager_id,employee_number,search_names");
+    // Permit an independently staged frontend release before the additive migration.
+    if(result.error && ["42703","PGRST204"].includes(result.error.code)) result = await sb.from("directory").select("employee_id,name,email,title,store,manager_id");
     dir = result.data || [];
   }
   const { data: ss } = await sb.from("store_states").select("store,us_state");
@@ -869,6 +879,7 @@ async function loadContext(){
   }
   if(epoch !== sessionEpoch || session?.user?.id !== userId) return;
   isAdmin = nextIsAdmin; isHandler = nextIsHandler;
+  if(!isHandler){ employeeTest=false; employeeTestReceipt=null; }
   dirList = dir;
   dirMap = Object.fromEntries(dirList.map(d => [d.employee_id, d]));
   dirLoaded = nextIsHandler;   // handlers now have the directory; lookups can say "no match" honestly
@@ -921,10 +932,17 @@ async function signOut(){
 // ---------------- NAV ----------------
 function tabs(){
   const t = [{id:"home",label:"Home"},{id:"status",label:"Check my report status"}];
-  if (isHandler) t.push({id:"dashboard",label:"HR Dashboard"},{id:"lookup",label:"Employee Lookup"});
+  if (isHandler) t.push({id:"dashboard",label:"HR Dashboard"},{id:"lookup",label:"Employee Lookup"},{id:"employee-test",label:"Employee test"});
   return t;
 }
 function go(v){
+  if(employeeTest && busy) return;
+  if(v==="employee-test" && !isHandler) v="home";
+  if(employeeTest && !["home","incident","status"].includes(v)){
+    if((form.description.trim() || form.files?.length || form.parties.length) && !confirm("Leave this test draft? It has not been submitted.")) return;
+    employeeTest=false; form=blankIncident(); form.email=verifiedEmail();
+  }
+  statusLookupGeneration += 1; messageThreadGeneration += 1;
   closeAttachmentPreview(false);
   if ((v==="dashboard"||v==="lookup") && !isHandler) v="home";
   if (showManual){ syncManualFields(); flushManualDraft(true); }   // nav closes the form — persist the debounce tail first
@@ -991,7 +1009,7 @@ function applyRoute(){
         else if (dv === "legal" && routeId(parts[2])) lgOpen(parts[2]);
       }
     }
-    else if (["home","status","incident","request","lookup"].includes(head)) go(head);
+    else if (["home","status","incident","request","lookup","employee-test"].includes(head)) go(head);
     else go("home");
   } finally { routeApplying = false; }
   // Normalize without adding a history entry (bad ids, non-handler fallbacks).
@@ -1050,8 +1068,50 @@ function setRememberDevice(on){ auth.remember = !!on; }
 window.addEventListener("otp-reset", ()=>{ auth={email:"",sent:false,err:"",remember:false}; render(); });
 
 // ---------------- HOME (question vs incident fork) ----------------
+function renderEmployeeTest(){
+  return `<div class="card" style="max-width:760px;margin:0 auto">
+    <h2 class="section">Test the employee experience</h2>
+    <p>Use your current sign-in to try an anonymous report, save its claim code, and exchange messages with the assigned handler.</p>
+    <div class="banner warn"><b>This creates a real test case.</b> Normal routing and permitted email notifications run. Use made-up details and harmless sample files. Close the case as <b>Test</b> when finished, before the next reporting snapshot.</div>
+    <ol><li>Start the anonymous report below. The form includes a test label and a non-store location.</li>
+      <li>Submit once, save the reference and claim code, then check the report and send a sample message.</li>
+      <li>Return to HR. Have the assigned handler check that the reporter is shown as Anonymous and reply. Use the claim code to read their reply.</li>
+      <li>Ask the assigned handler to close it using <b>Test</b>.</li></ol>
+    <p class="note-sm">Your HR permissions remain unchanged. This checks the reporting experience; a separate non-HR email sign-in is still needed to verify employee access restrictions and the sign-in code. Reporter email delivery also depends on the current tester allowlist.</p>
+    <button class="btn" onclick="startEmployeeTest()">Start anonymous test report</button>
+    ${employeeTestReceipt?`<p>Last test in this session: <b>${esc(employeeTestReceipt.ref)}</b>. Save your claim code before refreshing or signing out.</p><button class="btn sec" onclick="openEmployeeTestStatus()">Check last test report</button>`:""}
+  </div>`;
+}
+function employeeTestBanner(){
+  return employeeTest ? `<div class="banner warn" style="margin-bottom:16px"><b>Employee test in progress.</b> This is a real case with normal routing, using your HR sign-in. Keep all details fictional and close it as <b>Test</b> afterward. <button class="btn sm sec" onclick="endEmployeeTest()" ${busy?'disabled':''}>Return to HR</button></div>` : "";
+}
+function startEmployeeTest(){
+  if(!session || !isHandler || busy) return;
+  if((form.description.trim() || form.files?.length || form.parties.length) && !confirm("Replace the current incident draft with a fictional test report?")) return;
+  if(showManual){ syncManualFields(); flushManualDraft(true); }
+  employeeTest=true;
+  form=blankIncident(); form.anonymous=true; form.category="Other";
+  form.location=OTHER_LOCATION; form.email=verifiedEmail();
+  form.description="Fictional test report to check submission, claim-code access, and two-way messages. No real incident or person is involved.";
+  partySearchResults=[]; partySearchError="";
+  go("incident");
+}
+function endEmployeeTest(){
+  if(busy) return;
+  if(employeeTest && (form.description.trim() || form.files?.length || form.parties.length) && !confirm("Leave this test draft? It has not been submitted.")) return;
+  employeeTest=false; form=blankIncident(); form.email=verifiedEmail();
+  go("dashboard");
+}
+async function openEmployeeTestStatus(){
+  if(!session || !isHandler || busy || !employeeTestReceipt?.claim_code) return;
+  if((form.description.trim() || form.files?.length || form.parties.length) && !confirm("Discard the current incident draft and open your last test report?")) return;
+  form=blankIncident(); form.email=verifiedEmail();
+  employeeTest=true; go("status");
+  const input=$("cc"); if(input) input.value=employeeTestReceipt.claim_code;
+  await doStatusCheck();
+}
 function renderHome(){
-  return `${trustedDeviceNotice?`<div class="banner ${usingTrustedSession()?'ok':'info'}" style="max-width:720px;margin:24px auto 0">${esc(trustedDeviceNotice)}</div>`:""}${receipt?`<div style="max-width:720px;margin:24px auto 0">${renderReceipt(receipt)}</div>`:""}
+  return `${employeeTest?`<div style="max-width:720px;margin:24px auto 0">${employeeTestBanner()}</div>`:""}${trustedDeviceNotice?`<div class="banner ${usingTrustedSession()?'ok':'info'}" style="max-width:720px;margin:24px auto 0">${esc(trustedDeviceNotice)}</div>`:""}${receipt?`<div style="max-width:720px;margin:24px auto 0">${renderReceipt(receipt)}</div>`:""}
   <div class="card" style="max-width:720px;margin:24px auto">
     <h2 class="section">How can HR help?</h2>
     <p class="muted">Choose one to get started.</p>
@@ -1117,8 +1177,9 @@ function partyBuilder(f, pre){
   const P = pre ? {input:"mOnPartyInput",pick:"mPickPartyEmp",add:"mAddParty",rm:"mRmParty",set:"setM",role:"mToggleRole"}
                 : {input:"onPartyInput",pick:"pickPartyEmp",add:"addParty",rm:"rmParty",set:"setF",role:"toggleRole"};
   const directoryAllowed = !!pre || canUseDirectorySearch();
-  const results = f.pType==="employee" && directoryAllowed && f.pQuery.trim().length >= (isHandler ? 2 : 4)
-    ? (isHandler ? employeeMatches(f.pQuery)   // shared accent-insensitive lookup (T136)
+  const handlerSearch = isHandler && !employeeTest;
+  const results = f.pType==="employee" && directoryAllowed && f.pQuery.trim().length >= (handlerSearch ? 2 : 4)
+    ? (handlerSearch ? employeeMatches(f.pQuery)   // shared accent-insensitive lookup (T136)
       : partySearchResults)
     : [];
   return `
@@ -1130,7 +1191,7 @@ function partyBuilder(f, pre){
         <div class="role-multi">${PARTY_ROLES.map(r=>`<label class="role-opt"><input type="checkbox" ${f.pRoles.includes(r)?'checked':''} onchange="${P.role}('${r}',this.checked)"> ${rlabel(r)}</label>`).join("")}</div></div>
       <div class="col" style="min-width:220px">
         ${f.pType==="employee" && directoryAllowed
-          ? `<span class="mini-l">Find the employee</span><input id="${pre}psearch" type="text" placeholder="${isHandler?'Search a name or title…':'Enter at least 4 characters…'}" value="${esc(f.pQuery)}" oninput="${P.input}(this.value)">`
+          ? `<span class="mini-l">Find the employee</span><input id="${pre}psearch" type="text" placeholder="${handlerSearch?'Search a name, title, or employee ID…':'Name or employee ID (at least 4 characters)…'}" value="${esc(f.pQuery)}" oninput="${P.input}(this.value)">`
           : `<span class="mini-l">${f.pType==="employee"?'Employee name / description':'Customer name / description'}</span><input id="${pre}pname" type="text" placeholder="${f.pType==="employee"?'Enter the person’s name or identifying description':'e.g. customer, tall, red jacket'}" value="${esc(f.pName)}" oninput="${P.set}('pName',this.value,true)">
              <div style="margin-top:6px"><button class="btn sm sec" onclick="${P.add}()">Add ${f.pType==="employee"?'person':'customer'}</button></div>`}
       </div>
@@ -1143,6 +1204,7 @@ function renderIncident(){
   return `<div class="card">
     <button class="back" onclick="go('home')">← Back</button>
     <h2 class="section">Report an incident</h2>
+    ${employeeTestBanner()}
     <p class="muted">Only the assigned HR handler can see this — never anyone the report is about.</p>
 
     <label for="f-location">Which location is this about?</label>
@@ -1153,7 +1215,7 @@ function renderIncident(){
 
     <label>How do you want to submit?</label>
     <div class="radio-cards">
-      <div class="radio-card ${!form.anonymous?'sel':''}" onclick="setF('anonymous',false)"><b>With my name</b><span class="muted">HR can follow up with you directly.</span></div>
+      ${employeeTest?"":`<div class="radio-card ${!form.anonymous?'sel':''}" onclick="setF('anonymous',false)"><b>With my name</b><span class="muted">HR can follow up with you directly.</span></div>`}
       <div class="radio-card ${form.anonymous?'sel':''}" onclick="setF('anonymous',true)"><b>Anonymously</b><span class="muted">HR never sees who you are. You still get email updates, and a claim code for two-way messaging.</span></div>
     </div>
     ${form.anonymous?`<div class="banner ok" style="margin-top:10px">Your name is hidden from HR. Your email is stored securely <b>only</b> so the system can send you updates — the HR team cannot see it.</div>`:""}
@@ -1175,7 +1237,8 @@ function renderIncident(){
 
     <label>Relevant documents <span class="muted" style="font-weight:400">(optional)</span></label>
     <p class="note-sm" style="margin:0 0 6px">If you have any relevant documents for this case, please submit them — photos, screenshots, PDFs.</p>
-    <input id="f-files" type="file" multiple>
+    <input id="f-files" type="file" multiple onchange="setF('files',Array.from(this.files),true)">
+    ${form.files?.length?`<p class="note-sm">Selected: ${form.files.map(f=>esc(f.name)).join(", ")}</p>`:""}
 
     <label>Verified sign-in email <span class="muted" style="font-weight:400">(for your case confirmation and updates)</span></label>
     <input id="f-email" type="email" value="${esc(verifiedEmail())}" readonly>
@@ -1195,7 +1258,7 @@ function paintIncidentStatus(){
     submitButton.innerHTML = busy ? '<span class="spin"></span> Submitting…' : 'Submit report';
   }
 }
-function setF(k,v,silent){ form[k]=v; if(!silent) render(); }
+function setF(k,v,silent){ if(employeeTest && k==="anonymous") v=true; form[k]=v; if(!silent) render(); }
 function setIncidentLocation(value){ form.location=value; form.usState=stateMap[value]||""; }
 function onPartyInput(v){
   form.pQuery=v; partySearchResults=[]; partySearchError=""; render();
@@ -1203,7 +1266,7 @@ function onPartyInput(v){
   const query = v.trim();
   clearTimeout(partySearchTimer);
   const seq = ++partySearchSeq;
-  if(isHandler || !canUseDirectorySearch() || query.length < 4) return;
+  if((isHandler && !employeeTest) || !canUseDirectorySearch() || query.length < 4) return;
   partySearchTimer=setTimeout(async()=>{
     const { data, error } = await sb.rpc("directory_search", { p_query: query });
     if(seq !== partySearchSeq || form.pQuery.trim() !== query) return;
@@ -1243,12 +1306,14 @@ function addParty(){
 function rmParty(i){ form.parties.splice(i,1); render(); }
 
 async function submitIncident(){
+  if(busy) return;
   const epoch = sessionEpoch;
   form.description = $("f-desc")?.value ?? form.description ?? "";
   form.email = verifiedEmail(); form.phone = (($("f-phone")?.value ?? form.phone)||"").trim();
   form.role = form.relationship==="Employee" ? ($("f-role")?.value||form.role||"") : "";
   form.location = $("f-location")?.value ?? form.location;
-  const files = Array.from($("f-files")?.files || []);
+  const selectedFiles = Array.from($("f-files")?.files || []);
+  const files = selectedFiles.length ? selectedFiles : (form.files || []);
   errorMsg=""; paintIncidentStatus();
   const chosenLocation = canonicalLocation(form.location, true);
   if(!chosenLocation){ errorMsg=locationError(true); paintIncidentStatus(); return; }
@@ -1259,8 +1324,8 @@ async function submitIncident(){
   let data, error;
   try {
     ({ data, error } = await sb.rpc("submit_case_v2", {
-      p_intake_type:"incident", p_category:form.category, p_description:form.description,
-      p_anonymous:form.anonymous, p_location:form.location, p_relationship:form.relationship,
+      p_intake_type:"incident", p_category:form.category, p_description:employeeTest ? `${EMPLOYEE_TEST_PREFIX}\n\n${form.description}` : form.description,
+      p_anonymous:employeeTest || form.anonymous, p_location:form.location, p_relationship:form.relationship,
       p_role:form.role||null, p_contact_email:form.email, p_contact_phone:form.phone||null,
       p_parties:form.parties, p_manual:false, p_incident_date:form.incidentDate, p_us_state:form.usState||null }));
   } catch(e) { error = e; }
@@ -1279,7 +1344,8 @@ async function submitIncident(){
                           : `${files.length} file(s) attached.`;
   }
   busy=false;
-  receipt = Object.assign({upNote}, data);
+  receipt = Object.assign({upNote, employeeTest}, data);
+  if(employeeTest) employeeTestReceipt={ref:data.ref,claim_code:data.claim_code};
   form = blankIncident(); form.email = verifiedEmail();
   view = "home";   // land back on the home screen with the confirmation on top
   render(); window.scrollTo({top:0,behavior:"smooth"});
@@ -1287,6 +1353,7 @@ async function submitIncident(){
 function renderReceipt(r){
   if(r.question) return `<div class="card"><div class="banner ok"><b>Sent to HR.</b> Reference <span class="ref">${esc(r.ref)}</span> — you'll get a reply at the email you provided.</div></div>`;
   return `<div class="card">
+    ${r.employeeTest?`<div class="banner warn"><b>Test case created.</b> Save your reference and claim code. Normal routing applies; close this case as <b>Test</b> after the exercise.</div>`:""}
     <div class="banner ok"><b>Report received.</b> Reference <span class="ref">${esc(r.ref)}</span> — a confirmation email is on its way.</div>
     ${r.upNote?`<p class="muted">${esc(r.upNote)}</p>`:""}
     ${evidenceRetry.caseId===r.case_id && evidenceRetry.files.length
@@ -1299,6 +1366,7 @@ function renderReceipt(r){
     <div class="divider"></div>
     <div class="kv"><span class="k">Routed to</span><b>${esc(r.handler)}</b>${r.external?' <span class="warnbadge" style="margin-left:8px">EXTERNAL</span>':''}</div>
     <div class="kv"><span class="k">Why</span><span>${r.route_reason==='default'?'Default handler — no conflict of interest.':r.route_reason==='conflict_reroute'?'Rerouted — the usual handler was connected to this case.':'All internal HR handlers were conflicted → external advisor.'}</span></div>
+    ${r.employeeTest?`<div class="row" style="margin-top:16px"><button class="btn sec" onclick="openEmployeeTestStatus()">Check test report and messages</button><button class="btn sec" onclick="endEmployeeTest()">Return to HR</button></div>`:""}
   </div>`;
 }
 
@@ -4634,6 +4702,7 @@ async function pickLookup(id){
 // ---------------- STATUS (claim code + my named reports) ----------------
 function renderStatus(){
   return `<div class="card">
+    ${employeeTestBanner()}
     <h2 class="section">Check the status of your report</h2>
     <p class="muted">Reported anonymously? Enter your claim code. You'll also get email updates automatically whenever your case changes.</p>
     <label>Claim code</label>
@@ -4695,14 +4764,18 @@ async function retryEvidenceUploads(){
 async function doStatusCheck(){
   closeAttachmentPreview(false);
   const code = $("cc")?.value.trim().toUpperCase(); if(!code) return;
-  const epoch = sessionEpoch;
-  const { data, error } = await sb.rpc("check_status",{ p_claim_code: code });
-  if(epoch !== sessionEpoch) return;
+  const epoch = sessionEpoch, generation = ++statusLookupGeneration;
+  messageThreadGeneration += 1;
+  const current=()=>epoch===sessionEpoch && generation===statusLookupGeneration && view==="status";
+  let data, error;
+  try{ ({data,error}=await sb.rpc("check_status",{p_claim_code:code})); }
+  catch(e){ error=e; }
+  if(!current()) return;
   statusResult = error
     ? {tried:code,found:false,error:"Status lookup is temporarily unavailable. Please try again."}
     : Object.assign({tried:code}, data);
   if(!error&&statusResult.found) await loadMessageThread(null,code,null);
-  render();
+  if(current()) render();
 }
 async function openNamedReportMessages(caseRef){
   closeAttachmentPreview(false);if(!caseRef)return;statusResult={tried:"",found:true,ref:caseRef,state:"",handler:"",named:true};
@@ -5173,6 +5246,7 @@ function render(){
   if(medicalInviteToken){ void renderMedicalInviteInto(el); return; }
   if((view==="dashboard"||view==="lookup") && !isHandler) view="home";
   if(view==="home"){ el.innerHTML = renderHome(); }
+  else if(view==="employee-test"){ el.innerHTML = isHandler ? renderEmployeeTest() : renderHome(); }
   else if(view==="incident"){ el.innerHTML = renderIncident(); }
   else if(view==="request"){ el.innerHTML = renderRequest(); }
   else if(view==="status"){
