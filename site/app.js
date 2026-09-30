@@ -411,12 +411,14 @@ let lgSelected = null;      // null = list; "new" = create form; else legal_case
 let lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" };   // Active by default (spec)
 let legalData = [];
 let lgEditing = false;
-let legalDetail = { notes:[], files:[], links:[], linkedCases:{}, linkedFiles:{}, errors:[] };
+let legalDetail = { notes:[], files:[], links:[], relatedLinks:[], linkedCases:{}, linkedFiles:{}, errors:[] };
 let legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false };
 // T137 linked-cases picker. Query is bound to state with a silent oninput so a
 // full render() never loses typed text; results paint into their own container.
 let legalLinkPicker = { caseId:null, query:"", results:[], linked:[], busy:false, err:"", seq:0 };
 let legalLinkTimer = null;
+let caseLinkPicker = { caseId:null, query:"", results:[], linked:[], busy:false, err:"", seq:0 };
+let caseLinkTimer = null;
 let legalBusy = { note:false, upload:false };
 let legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" };
 let legalPreviewGeneration = 0;
@@ -429,6 +431,7 @@ let messageThreadGeneration = 0;
 let closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
 let lastShown = [];        // rows currently visible on the cases/requests dashboard (feeds Export CSV)
 let caseExport = null;     // everything fetched for the open case detail (feeds Export case .zip)
+let aiReview = blankAiReview();
 let caseExportInProgress = false, caseExportGeneration = 0;
 let lookup = { query:"", picked:null, result:null, err:"" };
 let evidence = { list:[], err:"" };
@@ -499,12 +502,15 @@ function resetSessionState(preserveMedicalInvite=false){
   showManual = false; manual = blankIncident(true); manualDraftAt = null; draftPending = false; draftSaveFailed = false;
   wcSelected = null; wcFilters = { q:"", status:"", state:"", asg:"", quick:"" }; wcData = []; wcSort = { key:"", dir:1 };
   lgSelected = null; lgFilters = { q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData = []; lgSort = { key:"", dir:1 };
-  lgEditing = false; legalDetail = { notes:[], files:[], errors:[] };
+  lgEditing = false; legalDetail = { notes:[], files:[], links:[], relatedLinks:[], linkedCases:{}, linkedFiles:{}, errors:[] };
+  legalLinkPicker = {caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1};
+  caseLinkPicker = {caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:caseLinkPicker.seq+1};
   legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false }; legalBusy = { note:false, upload:false };
   legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1;
   messageThread = blankMessageThread(); messageThreadGeneration += 1;
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
+  aiReview = blankAiReview();
   cdRequester = { caseId:null, err:"", busy:false };
   caseExportInProgress = false; caseExportGeneration += 1;
   lookup = { query:"", picked:null, result:null, err:"" };
@@ -769,7 +775,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   wcSetFiles, wcUploadDocuments, wcDownloadDocument,
   lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
-  lgLinkSearchInput, lgLinkCase, lgUnlinkCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
+  lgLinkSearchInput, lgLinkCase, lgUnlinkCase, caseLinkSearchInput, caseLinkCreate, caseLinkRemove, openLinkedCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
   lgLinkedCaseFilePreview, lgLinkedCaseFileDownload, lgLinkedMessagePreview, lgLinkedMessageDownload,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
   exportCasesCsv, exportCaseZip, assertCaseZipBudget,
@@ -780,7 +786,8 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   loadMedicalPanel, startMedicalMfa, verifyMedicalMfa, handleMedicalQrError, setMedicalFiles, uploadMedicalFiles, previewMedicalDocument, downloadMedicalDocument,
   setMedicalInviteField, createMedicalReturnRequest, resendMedicalReturnRequest, toggleMedicalLegalHold, loadMedicalAudit, setMedicalAuditGroup, previewMedicalRetention, enqueueMedicalRetention,
   sendMedicalReturnForm, revokeMedicalReturnRequest, startMedicalDueDateEdit, setMedicalDueDateValue, cancelMedicalDueDateEdit, saveMedicalDueDate,
-  setMedicalReturnFiles, submitMedicalReturnFiles });
+  setMedicalReturnFiles, submitMedicalReturnFiles,
+  aiReviewSet, aiReviewToggleDescription, aiReviewToggleNote, aiReviewFactEdit, buildAiReviewPreview, saveAiReviewDraft, queueAiReview, decideAiReview, refreshAiReview });
 
 // ---------------- AUTH / BOOTSTRAP ----------------
 async function boot(){
@@ -1433,7 +1440,7 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; wcSort={ key:"", dir:1 }; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgSort={ key:"", dir:1 }; lgEditing=false; legalDetail={notes:[],files:[],errors:[]}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
+function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; wcSort={ key:"", dir:1 }; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgSort={ key:"", dir:1 }; lgEditing=false; legalDetail={notes:[],files:[],links:[],relatedLinks:[],linkedCases:{},linkedFiles:{},errors:[]}; legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -2284,10 +2291,11 @@ async function renderLegalInto(el){
   if (sel) {
     const stillCurrent = () => epoch === sessionEpoch && session?.user?.id === userId
       && dashView === dv && lgSelected === sel.id && el.isConnected;
-    const [notesResult, filesResult, linksResult] = await Promise.all([
+    const [notesResult, filesResult, linksResult, relatedResult] = await Promise.all([
       sb.from("legal_case_notes").select("*").eq("legal_case_id",sel.id).order("created_at",{ascending:true}),
       listLegalDocuments(sel.id, stillCurrent),
       sb.from("legal_case_links").select("*").eq("legal_case_id",sel.id).order("created_at",{ascending:true}),
+      sb.rpc("case_link_list",{p_origin_kind:"legal",p_origin_id:sel.id}),
     ]);
     if (!stillCurrent() || filesResult.stale) return;
     // T137 linked cases: fetch the linked case rows the viewer is allowed to
@@ -2309,16 +2317,18 @@ async function renderLegalInto(el){
     legalDetail = {
       notes: notesResult.data || [],
       files: filesResult.data || [],
-      links, linkedCases, linkedFiles,
+      links, relatedLinks:relatedResult.data || [], linkedCases, linkedFiles,
       errors: [notesResult.error ? "HR notes are unavailable until the Legal Claims detail migration is deployed." : "",
                filesResult.error ? "Related document storage is not available yet." : "",
-               linksResult.error ? "Linked cases are unavailable until the T137 legal migration is deployed." : ""].filter(Boolean),
+               linksResult.error ? "Linked cases are unavailable until the T137 legal migration is deployed." : "",
+               relatedResult.error ? "Universal case links are not available until the latest migration is deployed." : ""].filter(Boolean),
     };
   } else {
-    legalDetail = { notes:[], files:[], links:[], linkedCases:{}, linkedFiles:{}, errors:[] };
+    legalDetail = { notes:[], files:[], links:[], relatedLinks:[], linkedCases:{}, linkedFiles:{}, errors:[] };
   }
   if (lgSelected) {
     el.innerHTML = lgSelected === "new" || lgEditing ? lgEditor(sel) : lgSummary(sel);
+    if(sel&&!lgEditing) void loadAiReview("legal",sel);
     if (legalPreview.open) {
       const generation = legalPreviewGeneration;
       requestAnimationFrame(() => {
@@ -2459,6 +2469,7 @@ const legalDocumentKind = name => {
 };
 function lgSummary(r){
   if (!r) return "";
+  aiReviewInit("legal",r);
   if (legalComposer.caseId !== r.id) legalComposer = {caseId:r.id,note:"",files:[],status:"",error:"",noteError:"",retry:false};
   const docs = legalDetail.files.length ? legalDetail.files.map(f=>{
     const display = legalDocumentName(f.name);
@@ -2499,6 +2510,7 @@ function lgSummary(r){
         <div><div class="mini-l">Violation description</div><div class="detail-copy">${esc(r.violation_description||'—')}</div></div>
       </div>
     </div>
+    ${aiReviewCardHtml()}
     ${legalDetail.errors.map(m=>`<div class="banner warn">${esc(m)}</div>`).join("")}
     <div class="row legal-detail-row">
       <div class="col card"><div class="legal-section-head"><b>HR notes</b><span class="chip">internal · append-only</span></div>
@@ -2534,7 +2546,7 @@ function lgSummary(r){
 // that way (or add a wipe-guard first) if the editor ever grows this card.
 function lgLinkedCasesCard(r){
   const links = legalDetail.links || [];
-  const rows = links.length ? links.map(l=>{
+  const ordinaryRows = links.length ? links.map(l=>{
     const c = legalDetail.linkedCases[l.linked_case_id];
     const carried = legalDetail.linkedFiles[l.linked_case_id] || {evidence:[],caseFiles:[],messageFiles:[],errors:[]};
     const evidenceRows = (carried.evidence||[]).map(f=>{
@@ -2572,21 +2584,28 @@ function lgLinkedCasesCard(r){
       : '<span class="muted">No authorized ordinary evidence or attachments are available for this case.</span>';
     return `<div class="hrnote">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="ref">${esc(c?.ref || l.linked_ref)}</span>
+        ${c?`<button type="button" class="row-link ref" onclick="openLinkedCase('case','${esc(c.id)}','${esc(c.intake_type==='request'?'Accommodation':'Incident')}')">${esc(c.ref)}</button>`:`<span class="ref">${esc(l.linked_ref)}</span>`}
         ${c?`<span class="chip">${esc(c.intake_type==="request"?"Accommodation / request":"Incident case")}</span> <span>${esc(c.category||"")}</span> <span class="muted">${esc(stlabel(c.state||""))}</span>`
            :`<span class="muted">Details restricted — this case isn't visible to you, so its files stay hidden.</span>`}
         <button class="btn sm ghost" style="margin-left:auto" data-l="${esc(l.id)}" data-r="${esc(c?.ref || l.linked_ref)}" onclick="lgUnlinkCase(this.dataset.l,this.dataset.r)">Unlink</button>
       </div>
       ${c?`<div style="margin-top:8px">${(carried.errors||[]).map(error=>`<div class="banner warn">${esc(error)}</div>`).join("")}${fileSections || emptyFiles}</div>`:""}
     </div>`;
-  }).join("") : '<span class="muted">No linked cases.</span>';
+  }).join("") : '';
+  const legalRows = (legalDetail.relatedLinks||[]).filter(l=>l.target_kind==="legal").map(l=>`<div class="hrnote">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button type="button" class="row-link ref" onclick="openLinkedCase('legal','${esc(l.target_id)}','Legal')">${esc(l.ref)}</button>
+      <span class="chip">Legal</span><span>${esc(l.label||"")}</span><span class="muted">${esc(l.status||"")}</span>
+      <button class="btn sm ghost" style="margin-left:auto" data-l="${esc(l.link_id)}" data-r="${esc(l.ref)}" onclick="caseLinkRemove('legal','${esc(r.id)}','${esc(l.relation_kind)}',this.dataset.l,this.dataset.r)">Unlink</button>
+    </div></div>`).join("");
+  const rows = ordinaryRows + legalRows || '<span class="muted">No linked cases.</span>';
   return `<div class="card" id="lg-linked-cases">
     <div class="legal-section-head"><b>Linked cases</b><span class="chip">ordinary files carry into this view</span></div>
     <p class="note-sm">Ordinary evidence, email/case files, and message attachments from a linked case appear below. Restricted medical-vault documents never carry into Legal. Unlinking removes these files from this view; the case and files themselves are not deleted.</p>
     <div style="margin-top:12px">${rows}</div>
     <div class="legal-note-compose" style="align-items:flex-end">
       <div style="flex:1"><label>Link a case by case number</label>
-        <input id="lg-link-q" type="text" autocomplete="off" placeholder="e.g. EB-2026-0142 — incidents and accommodation requests" value="${esc(legalLinkPicker.query)}" oninput="lgLinkSearchInput(this.value)"></div>
+        <input id="lg-link-q" type="text" autocomplete="off" placeholder="e.g. EB-2026-0142 or LC-2026-004" value="${esc(legalLinkPicker.query)}" oninput="lgLinkSearchInput(this.value)"></div>
     </div>
     <div id="lg-link-results" aria-live="polite" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${lgLinkResultsHtml()}</div>
   </div>`;
@@ -2599,7 +2618,7 @@ function lgLinkResultsHtml(){
   // read as "no such case" — show it as an inert "Already linked" chip.
   const linked = legalLinkPicker.linked || [];
   if (!legalLinkPicker.results.length && !linked.length) return `<span class="note-sm">No matching cases you can access.</span>`;
-  return legalLinkPicker.results.map(c=>`<button type="button" class="btn sm sec" data-c="${esc(c.id)}" onclick="lgLinkCase(this.dataset.c)">${esc(c.ref)} · ${esc(c.intake_type==="request"?"Request":"Incident")}${c.category?` · ${esc(c.category)}`:""} <span class="muted">${esc(stlabel(c.state||""))}</span></button>`).join("")
+  return legalLinkPicker.results.map(c=>`<button type="button" class="btn sm sec" data-c="${esc(c.target_id)}" data-k="${esc(c.target_kind)}" onclick="lgLinkCase(this.dataset.c,this.dataset.k)">${esc(c.ref)} · ${esc(c.case_type)}${c.label?` · ${esc(c.label)}`:""} <span class="muted">${esc(c.status||"")}</span></button>`).join("")
     + linked.map(c=>`<span class="chip">${esc(c.ref)} · Already linked</span>`).join("");
 }
 function paintLinkResults(){ const el=$("lg-link-results"); if (el) el.innerHTML = lgLinkResultsHtml(); }
@@ -2617,31 +2636,28 @@ async function lgLinkSearch(){
   legalLinkPicker.err = "";
   if (q.length < 2){ legalLinkPicker.results=[]; legalLinkPicker.linked=[]; legalLinkPicker.busy=false; paintLinkResults(); return; }
   legalLinkPicker.busy = true; paintLinkResults();
-  // RLS on cases (can_see_case) silently limits results to cases the viewer
-  // may see, which is exactly the set they are allowed to link.
-  const { data, error } = await sb.from("cases").select("id,ref,intake_type,category,state")
-    .ilike("ref",`%${q.replace(/[%_\\]/g,"")}%`).order("ref").limit(8);
+  const { data, error } = await sb.rpc("case_link_search",{p_origin_kind:"legal",p_origin_id:caseId,p_query:q});
   if (seq !== legalLinkPicker.seq || lgSelected !== caseId) return;
   legalLinkPicker.busy = false;
   // Split AFTER the await so the "Already linked" set reflects any link or
   // unlink that landed while the query was in flight.
-  const already = new Set((legalDetail.links||[]).map(l=>l.linked_case_id));
+  const already = new Set((legalDetail.relatedLinks||[]).map(l=>`${l.target_kind}:${l.target_id}`));
   if (error){ legalLinkPicker.err = errText(error); paintLinkResults(); return; }
-  legalLinkPicker.results = (data||[]).filter(c=>!already.has(c.id));
-  legalLinkPicker.linked  = (data||[]).filter(c=>already.has(c.id));
+  legalLinkPicker.results = (data||[]).filter(c=>!already.has(`${c.target_kind}:${c.target_id}`));
+  legalLinkPicker.linked  = (data||[]).filter(c=>already.has(`${c.target_kind}:${c.target_id}`));
   paintLinkResults();
 }
-async function lgLinkCase(caseId){
+async function lgLinkCase(caseId, targetKind="case"){
   const legalId = lgSelected;
   if (!legalId || legalId === "new") return;
-  const ctx = legalActionContext(legalId), picker = legalLinkPicker;
-  const { error } = await sb.rpc("legal_link_case",{ p_legal_case_id: legalId, p_case_id: caseId });
+  const ctx = legalActionContext(legalId), picker = legalLinkPicker, source=legalDetail;
+  const { error } = await sb.rpc("case_link_create",{p_origin_kind:"legal",p_origin_id:legalId,p_target_kind:targetKind,p_target_id:caseId});
   // An in-flight summary action must never repaint a subsequently opened
   // editor. Returning to the summary refetches the committed link normally.
   if (!ctx.visible() || lgEditing || legalLinkPicker !== picker) return;
   if (error){ legalLinkPicker.err = errText(error); paintLinkResults(); return; }
-  legalLinkPicker = { caseId: legalId, query:"", results:[], linked:[], busy:false, err:"", seq: legalLinkPicker.seq };
-  render();
+  legalLinkPicker = { caseId: legalId, query:"", results:[], linked:[], busy:false, err:"", seq: legalLinkPicker.seq+1 };
+  if(targetKind==="legal")await refreshCaseLinks("legal",legalId,source);else render();
 }
 async function lgUnlinkCase(linkId, ref){
   const legalId = lgSelected;
@@ -2659,6 +2675,76 @@ async function lgUnlinkCase(linkId, ref){
   // The unlinked case may now match the open search again — refresh so a
   // stale "Already linked" chip doesn't outlive the link it described.
   if (legalLinkPicker.caseId === legalId && legalLinkPicker.query.trim().length >= 2) void lgLinkSearch();
+}
+function linkedCaseRow(l, originKind, originId){
+  return `<div class="hrnote"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <button type="button" class="row-link ref" onclick="openLinkedCase('${esc(l.target_kind)}','${esc(l.target_id)}','${esc(l.case_type)}')">${esc(l.ref)}</button>
+    <span class="chip">${esc(l.case_type)}</span>${l.label?`<span>${esc(l.label)}</span>`:""}<span class="muted">${esc(l.status||"")}</span>
+    <button class="btn sm ghost" style="margin-left:auto" data-l="${esc(l.link_id)}" data-r="${esc(l.ref)}" onclick="caseLinkRemove('${originKind}','${esc(originId)}','${esc(l.relation_kind)}',this.dataset.l,this.dataset.r)">Unlink</button>
+  </div></div>`;
+}
+function caseLinkedCasesCard(c){
+  const links=caseExport?.relatedLinks||[];
+  const picker=caseLinkPicker;
+  return `<div class="card" id="case-linked-cases"><div class="legal-section-head"><b>Linked cases</b><span class="chip">incidents, accommodations, and Legal</span></div>
+    <p class="note-sm">Links appear on both records. Existing Legal links continue to carry authorized ordinary case files into the Legal view.</p>
+    ${caseExport?.linkError?`<div class="banner warn">${esc(caseExport.linkError)}</div>`:""}
+    <div style="margin-top:12px">${links.length?links.map(l=>linkedCaseRow(l,"case",c.id)).join(""):'<span class="muted">No linked cases.</span>'}</div>
+    <div class="legal-note-compose" style="align-items:flex-end"><div style="flex:1"><label>Link a case by case number</label><input id="case-link-q" type="text" autocomplete="off" placeholder="e.g. EB-2026-0142 or LC-2026-004" value="${esc(picker.caseId===c.id?picker.query:"")}" oninput="caseLinkSearchInput(this.value)"></div></div>
+    <div id="case-link-results" aria-live="polite" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${caseLinkResultsHtml(c.id)}</div></div>`;
+}
+function caseLinkResultsHtml(caseId){
+  const p=caseLinkPicker;if(p.caseId!==caseId)return "";
+  if(p.err)return `<div class="banner err">${esc(p.err)}</div>`;
+  if(p.busy)return '<span class="note-sm">Searching…</span>';
+  const html=(p.results||[]).map(r=>`<button type="button" class="btn sm sec" data-i="${esc(r.target_id)}" data-k="${esc(r.target_kind)}" onclick="caseLinkCreate(this.dataset.k,this.dataset.i)">${esc(r.ref)} · ${esc(r.case_type)}${r.label?` · ${esc(r.label)}`:""}</button>`).join("")
+    +(p.linked||[]).map(r=>`<span class="chip">${esc(r.ref)} · Already linked</span>`).join("");
+  return html||((p.query||"").trim().length>=2?'<span class="note-sm">No matching cases you can access.</span>':"");
+}
+function paintCaseLinkResults(){const el=$("case-link-results");if(el&&selected)el.innerHTML=caseLinkResultsHtml(selected);}
+function caseLinkSearchInput(value){
+  const id=selected;if(!id||caseLinkPicker.caseId!==id)return;
+  caseLinkPicker.query=String(value||"");clearTimeout(caseLinkTimer);
+  caseLinkTimer=setTimeout(()=>{void caseLinkSearch();},250);
+}
+async function caseLinkSearch(){
+  const id=selected,source=caseExport;if(!id||source?.c?.id!==id||caseLinkPicker.caseId!==id)return;
+  const q=caseLinkPicker.query.trim(),seq=++caseLinkPicker.seq;caseLinkPicker.err="";
+  if(q.length<2){caseLinkPicker.results=[];caseLinkPicker.linked=[];caseLinkPicker.busy=false;paintCaseLinkResults();return;}
+  caseLinkPicker.busy=true;paintCaseLinkResults();
+  const {data,error}=await sb.rpc("case_link_search",{p_origin_kind:"case",p_origin_id:id,p_query:q});
+  if(seq!==caseLinkPicker.seq||selected!==id||caseExport!==source)return;
+  caseLinkPicker.busy=false;const already=new Set((source.relatedLinks||[]).map(l=>`${l.target_kind}:${l.target_id}`));
+  if(error)caseLinkPicker.err=errText(error);else{caseLinkPicker.results=(data||[]).filter(r=>!already.has(`${r.target_kind}:${r.target_id}`));caseLinkPicker.linked=(data||[]).filter(r=>already.has(`${r.target_kind}:${r.target_id}`));}
+  paintCaseLinkResults();
+}
+async function refreshCaseLinks(originKind,originId,source){
+  const {data,error}=await sb.rpc("case_link_list",{p_origin_kind:originKind,p_origin_id:originId});
+  const current=originKind==="legal"?lgSelected===originId&&!lgEditing&&legalDetail===source:selected===originId&&caseExport===source;
+  if(!current)return false;
+  if(error){alert(errText(error));return false;}
+  source.relatedLinks=data||[];
+  const el=$(originKind==="legal"?"lg-linked-cases":"case-linked-cases");
+  if(el)el.outerHTML=originKind==="legal"?lgLinkedCasesCard(legalData.find(x=>x.id===originId)):caseLinkedCasesCard(source.c);
+  return true;
+}
+async function caseLinkCreate(targetKind,targetId){
+  const id=selected,source=caseExport,picker=caseLinkPicker;if(!id||source?.c?.id!==id)return;
+  const {error}=await sb.rpc("case_link_create",{p_origin_kind:"case",p_origin_id:id,p_target_kind:targetKind,p_target_id:targetId});
+  if(selected!==id||caseExport!==source||caseLinkPicker!==picker)return;
+  if(error){caseLinkPicker.err=errText(error);paintCaseLinkResults();return;}
+  caseLinkPicker={caseId:id,query:"",results:[],linked:[],busy:false,err:"",seq:caseLinkPicker.seq+1};await refreshCaseLinks("case",id,source);
+}
+async function caseLinkRemove(originKind,originId,relationKind,linkId,ref){
+  if(!confirm(`Remove linked case ${ref}?\n\nThe cases and their files are not deleted.`))return;
+  const epoch=sessionEpoch,source=originKind==="legal"?legalDetail:caseExport;
+  const {error}=await sb.rpc("case_link_remove",{p_origin_kind:originKind,p_origin_id:originId,p_relation_kind:relationKind,p_link_id:linkId});
+  const current=epoch===sessionEpoch&&(originKind==="legal"?lgSelected===originId&&!lgEditing&&legalDetail===source:selected===originId&&caseExport===source);
+  if(!current)return;if(error){alert(errText(error));return;}await refreshCaseLinks(originKind,originId,source);
+}
+function openLinkedCase(kind,id,caseType){
+  if(kind==="legal"){clearSelectedCaseState();setDashView("legal");lgOpen(id);return;}
+  setDashView(caseType==="Accommodation"?"requests":"cases");openCase(id);
 }
 async function lgLinkedEvidenceDownload(caseId, fname){
   const legalId = lgSelected;
@@ -3156,8 +3242,9 @@ function clearSelectedCaseState(){
   interviewDrafts.clear();
   partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
   medicalPanel=blankMedicalPanel();
+  clearTimeout(caseLinkTimer);caseLinkTimer=null;caseLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:caseLinkPicker.seq+1};
 }
-function openCase(id){ closeAttachmentPreview(false); clearSelectedCaseState(); selected=id; render(); syncRoute(); window.scrollTo({top:0,behavior:"smooth"}); }
+function openCase(id){ closeAttachmentPreview(false); clearSelectedCaseState(); selected=id; caseLinkPicker={caseId:id,query:"",results:[],linked:[],busy:false,err:"",seq:caseLinkPicker.seq}; render(); syncRoute(); window.scrollTo({top:0,behavior:"smooth"}); }
 function closeCase(){ closeAttachmentPreview(false); clearSelectedCaseState(); render(); syncRoute(); }
 
 // ---- manual case entry (for reports that reach People Support by email) ---
@@ -3514,6 +3601,178 @@ async function submitManualRequest(){
   alert(`Request ${data.ref} added.`); render();
 }
 
+// ---- redacted AI review ----------------------------------------------------
+// AI receives only the exact JSON shown here after local deterministic
+// redaction and two handler attestations. Pattern matching is a guardrail,
+// not a claim that unknown names or re-identification risk are solved.
+function blankAiReview(){ return { key:"", source:null, review:null, loaded:false, includeDescription:true, noteIds:[], curated:"", payload:"", hash:"", hashPending:false, editGeneration:0, dirty:false, attestIdentifiers:false, attestSensitive:false, busy:false, error:"", synopsisDecision:"", severityDecision:"", synopsis:"", severity:"" }; }
+function aiReviewKey(kind,id){ return `${kind}:${id}`; }
+function aiReviewInit(kind,row){
+  const key=aiReviewKey(kind,row.id);
+  if(aiReview.key!==key) aiReview={...blankAiReview(),key,source:{kind,row}};
+  else aiReview.source={kind,row};
+}
+function paintAiReview(){ const el=$("ai-review-card"); if(el) el.outerHTML=aiReviewCardHtml(); }
+function refreshAiReview(){const source=aiReview.source;if(!source||aiReview.dirty||aiReview.hashPending)return;void loadAiReview(source.kind,source.row);}
+function syncAiReviewEditControls(){
+  const card=$("ai-review-card");if(!card)return;
+  card.querySelectorAll(".ai-attest input").forEach(input=>{input.checked=false;input.disabled=aiReview.hashPending;});
+  const save=$("ai-review-save"),queue=$("ai-review-queue");
+  if(save)save.disabled=aiReview.busy||aiReview.hashPending;
+  if(queue)queue.disabled=aiReview.busy||aiReview.hashPending||aiReview.dirty;
+}
+async function loadAiReview(kind,row){
+  aiReviewInit(kind,row); const key=aiReview.key, epoch=sessionEpoch;
+  const {data,error}=await sb.rpc("ai_review_get",{p_source_kind:kind,p_source_id:row.id});
+  if(epoch!==sessionEpoch||aiReview.key!==key)return;
+  aiReview.loaded=true; aiReview.error=error?errText(error):""; aiReview.review=error?null:data;
+  if(data){ aiReview.payload=data.redacted_payload||""; aiReview.hash=data.payload_sha256||""; aiReview.synopsis=data.reviewed_synopsis||data.suggested_synopsis||""; aiReview.severity=data.reviewed_severity||(["Low","Medium","High"].includes(data.suggested_severity)?data.suggested_severity:""); }
+  paintAiReview();
+}
+function aiReviewStatus(status){ return ({DRAFT:"Reviewed draft",QUEUED:"Queued",PROCESSING:"Queued · in progress",PENDING:"Awaiting handler decision",APPROVED:"Approved",REJECTED:"Rejected",STALE:"Source changed · rebuild required"}[status]||status||"Not started"); }
+function aiReviewRetentionReady(r=aiReview.review){ return r?.retention_policy_configured===true&&Number.isInteger(r?.retention_days)&&r.retention_days>=1&&r.retention_days<=90; }
+function aiReviewSet(field,value){ if(!["curated","attestIdentifiers","attestSensitive","synopsisDecision","severityDecision","synopsis","severity"].includes(field))return; aiReview[field]=value; aiReview.error=""; }
+function aiReviewToggleDescription(checked){ aiReview.includeDescription=!!checked; aiReview.payload=""; aiReview.hash=""; paintAiReview(); }
+function aiReviewToggleNote(id,checked){ const ids=new Set(aiReview.noteIds); checked?ids.add(id):ids.delete(id); aiReview.noteIds=[...ids]; aiReview.payload=""; aiReview.hash=""; paintAiReview(); }
+function aiReviewReplacements(){
+  const row=aiReview.source?.row||{};
+  const replacements=[],seen=new Set(),counts={};
+  const add=(value,label)=>{const normalized=String(value||"").trim().toLowerCase();if(normalized.length<3||seen.has(normalized))return;seen.add(normalized);replacements.push({value:String(value).trim(),label});};
+  const addPerson=(value,label)=>{add(value,label);for(const alias of String(value||"").split(/[^\p{L}'-]+/u))if(alias.length>=3)add(alias,label);};
+  addPerson(row.reporter_display,"[Reporter]");addPerson(row.complainant,"[Complainant]");addPerson(row.opposing_counsel,"[Opposing counsel]");addPerson(row.company_counsel,"[Company counsel]");
+  for(const party of caseExport?.parties||[]){const value=party.display_name||nameOf(party.subject_id);const base=party.role_in_case==="subject"?"Implicated person":party.role_in_case==="victim"?"Impacted person":String(party.role_in_case||"").startsWith("witness")?"Witness":"Employee";counts[base]=(counts[base]||0)+1;addPerson(value,`[${base} ${String.fromCharCode(64+Math.min(counts[base],26))}]`);}
+  for(const d of dirList){const base=/manager|director|supervisor|lead/i.test(d.title||"")?"Manager":"Employee";counts[base]=(counts[base]||0)+1;addPerson(d.name,`[${base} ${String.fromCharCode(64+Math.min(counts[base],26))}]`);}
+  const locations=[row.location,...storeList.map(s=>typeof s==="string"?s:(s?.name||s?.location||"")),...dirList.map(d=>d.store)].filter(v=>String(v||"").trim().length>=3);
+  for(const location of locations)add(location,"[Location removed]");
+  return replacements.sort((a,b)=>b.value.length-a.value.length);
+}
+function replaceLiteral(text,value,replacement="[REDACTED]"){ return text.replace(new RegExp(String(value).replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi"),replacement); }
+function redactForAi(value){
+  let text=String(value||"").normalize("NFKC");
+  for(const replacement of aiReviewReplacements()) text=replaceLiteral(text,replacement.value,replacement.label);
+  return text
+    .replace(/[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}/g,"[REDACTED]")
+    .replace(/https?:\/\/\S+|www\.\S+/gi,"[REDACTED]")
+    .replace(/\+?\d[\d ()-]{7,}\d/g,"[REDACTED]")
+    .replace(/\b(?:EB|LC)-\d{4}-\d+\b/gi,"[REDACTED]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi,"[REDACTED]")
+    .replace(/\b(?:19|20)\d{2}-[01]\d-[0-3]\d\b/g,"[REDACTED]")
+    .replace(/\b[01]?\d\/[0-3]?\d\/(?:19|20)?\d{2}\b/g,"[REDACTED]")
+    .replace(/\b(?:0?[1-9]|1[0-2])\/[0-3]?\d\b/g,"[REDACTED]")
+    .replace(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?/gi,"[REDACTED]")
+    .replace(/[ \t]+/g," ").trim();
+}
+async function sha256Hex(text){ const bytes=new TextEncoder().encode(text); const hash=await crypto.subtle.digest("SHA-256",bytes); return [...new Uint8Array(hash)].map(v=>v.toString(16).padStart(2,"0")).join(""); }
+async function buildAiReviewPreview(){
+  const source=aiReview.source,key=aiReview.key,epoch=sessionEpoch; if(!source)return;
+  let facts=[];
+  if(source.kind==="case"&&source.row.intake_type!=="request"){
+    if(aiReview.includeDescription) facts.push(redactForAi(source.row.description));
+    const selected=new Set(aiReview.noteIds);
+    facts.push(...(caseExport?.notes||[]).filter(n=>selected.has(n.id)).map(n=>redactForAi(n.body)));
+  }else{
+    facts=aiReview.curated.split(/\n\s*\n/).map(redactForAi).filter(Boolean);
+  }
+  facts=facts.filter(Boolean);
+  if(!facts.length){ aiReview.error="Select at least one ordinary fact, or enter a sanitized fact packet."; paintAiReview(); return; }
+  const payload={schema_version:"hr-redaction-v1",facts:facts.map((text,index)=>({ref:`F${index+1}`,text})),limitations:["No files, medical-vault content, counsel material, linked cases, identifiers, contacts, locations, or dates were included.","Pattern checks cannot detect every name or re-identification risk; a handler must attest to this exact packet."]};
+  const payloadText=JSON.stringify(payload,null,2),generation=++aiReview.editGeneration;
+  aiReview.payload=payloadText;aiReview.hash="";aiReview.hashPending=true;aiReview.dirty=true;
+  aiReview.attestIdentifiers=false;aiReview.attestSensitive=false;aiReview.error="";paintAiReview();
+  const hash=await sha256Hex(payloadText);
+  if(aiReview.key!==key||sessionEpoch!==epoch||aiReview.editGeneration!==generation||aiReview.payload!==payloadText)return;
+  aiReview.hash=hash;aiReview.hashPending=false;syncAiReviewEditControls();
+}
+async function aiReviewFactEdit(index,value){
+  const key=aiReview.key,epoch=sessionEpoch;let packet;try{packet=JSON.parse(aiReview.payload);}catch{return;}
+  if(!packet.facts?.[index])return;packet.facts[index].text=value;
+  const payload=JSON.stringify(packet,null,2),generation=++aiReview.editGeneration;
+  aiReview.payload=payload;aiReview.hash="";aiReview.hashPending=true;aiReview.dirty=true;
+  aiReview.attestIdentifiers=false;aiReview.attestSensitive=false;aiReview.error="";syncAiReviewEditControls();
+  const hash=await sha256Hex(payload);
+  if(aiReview.key!==key||sessionEpoch!==epoch||aiReview.editGeneration!==generation||aiReview.payload!==payload)return;
+  aiReview.hash=hash;aiReview.hashPending=false;syncAiReviewEditControls();
+}
+function aiReviewSelection(){
+  const source=aiReview.source;
+  return source?.kind==="case"&&source.row.intake_type!=="request"
+    ? {include_description:aiReview.includeDescription,note_ids:[...aiReview.noteIds].sort()}:{};
+}
+function aiReviewPreviewHtml(){
+  if(!aiReview.payload)return "";
+  try{
+    const packet=JSON.parse(aiReview.payload);
+    const status=aiReview.review?.status,canEdit=aiReview.loaded&&!aiReview.error&&(!status||status==="DRAFT"||(["APPROVED","REJECTED","STALE"].includes(status)&&aiReview.dirty));
+    return `<div class="ai-preview"><div class="mini-l">Text sent for AI review</div><ol>${packet.facts.map((f,index)=>`<li><span class="chip">${esc(f.ref)}</span><textarea rows="3" aria-label="${esc(f.ref)} redacted fact" ${canEdit?'':"readonly"} oninput="aiReviewFactEdit(${index},this.value)">${esc(f.text)}</textarea></li>`).join("")}</ol>${canEdit?'<p class="note-sm">Edit any remaining name or identifying detail here. Changes require both confirmations again.</p>':''}<div class="mini-l">Limits attached to the review</div><ul>${packet.limitations.map(text=>`<li>${esc(text)}</li>`).join("")}</ul></div>`;
+  }catch{return '<div class="banner err">The preview could not be displayed. Build it again before continuing.</div>';}
+}
+async function saveAiReviewDraft(){
+  if(aiReview.busy||aiReview.hashPending)return;
+  if(!aiReview.payload||!aiReview.hash){aiReview.error="Build and review the redacted preview first.";paintAiReview();return;}
+  if(!aiReview.attestIdentifiers||!aiReview.attestSensitive){aiReview.error="Confirm both attestations for the exact preview before saving.";paintAiReview();return;}
+  const source=aiReview.source,key=aiReview.key,epoch=sessionEpoch; aiReview.busy=true;aiReview.error="";paintAiReview();
+  const {data,error}=await sb.rpc("ai_review_prepare",{p_source_kind:source.kind,p_source_id:source.row.id,p_source_selection:aiReviewSelection(),p_redacted_payload:aiReview.payload,p_payload_sha256:aiReview.hash,p_handler_attestation:true,p_expected_active_revision:aiReview.review?.status==="DRAFT"?aiReview.review.revision:null});
+  if(aiReview.key!==key||sessionEpoch!==epoch)return; aiReview.busy=false;
+  if(error){aiReview.error=errText(error);paintAiReview();return;}
+  aiReview.dirty=false;aiReview.review={...(aiReview.review||{}),...data,redacted_payload:aiReview.payload,payload_sha256:aiReview.hash};paintAiReview();
+}
+async function queueAiReview(){
+  const r=aiReview.review;if(aiReview.busy||aiReview.hashPending||aiReview.dirty||r?.status!=="DRAFT")return;
+  const key=aiReview.key,epoch=sessionEpoch;
+  aiReview.busy=true;aiReview.error="";paintAiReview();
+  const {data,error}=await sb.rpc("ai_review_submit",{p_review_id:r.review_id,p_expected_revision:r.revision,p_payload_sha256:r.payload_sha256});
+  if(aiReview.key!==key||sessionEpoch!==epoch)return;aiReview.busy=false;if(error){aiReview.error=errText(error);}else aiReview.review={...r,...data};paintAiReview();
+}
+async function decideAiReview(){
+  const r=aiReview.review;if(aiReview.busy||r?.status!=="PENDING")return;
+  const source=aiReview.source,key=aiReview.key,epoch=sessionEpoch;
+  if(!["APPROVED","REJECTED"].includes(aiReview.synopsisDecision)||!["APPROVED","REJECTED"].includes(aiReview.severityDecision)){aiReview.error="Approve or reject each suggestion separately.";paintAiReview();return;}
+  if(aiReview.synopsisDecision==="APPROVED"&&!aiReview.synopsis.trim()){aiReview.error="An approved synopsis cannot be blank.";paintAiReview();return;}
+  if(aiReview.severityDecision==="APPROVED"&&!["Low","Medium","High"].includes(aiReview.severity)){aiReview.error="Choose Low, Medium, or High before approving severity.";paintAiReview();return;}
+  aiReview.busy=true;aiReview.error="";paintAiReview();
+  const {data,error}=await sb.rpc("ai_review_decide",{p_review_id:r.review_id,p_expected_revision:r.revision,p_expected_source_fingerprint:r.source_fingerprint,p_synopsis_decision:aiReview.synopsisDecision,p_reviewed_synopsis:aiReview.synopsis,p_severity_decision:aiReview.severityDecision,p_reviewed_severity:aiReview.severity||null});
+  if(aiReview.key!==key||sessionEpoch!==epoch)return;aiReview.busy=false;if(error){aiReview.error=errText(error);paintAiReview();return;}
+  aiReview.review={...r,...data};paintAiReview();
+  if(source.kind==="case"&&aiReview.severityDecision==="APPROVED"){
+    const result=await sb.from("cases").select("risk_level,ai_summary").eq("id",source.row.id).maybeSingle();
+    if(aiReview.key!==key||sessionEpoch!==epoch)return;
+    if(!result.error&&result.data){Object.assign(source.row,result.data);if(caseExport?.c?.id===source.row.id)Object.assign(caseExport.c,result.data);const risk=$("risk-sel");if(risk)risk.value=result.data.risk_level||"";}
+  }
+  await loadAiReview(source.kind,source.row);
+}
+function aiDecisionChoice(group,value,label){return `<label class="ai-choice"><input type="radio" name="${group}" value="${value}" ${aiReview[group]===value?'checked':''} onchange="aiReviewSet('${group}',this.value)"> ${label}</label>`;}
+function aiReviewCardHtml(){
+  const source=aiReview.source;if(!source)return '<section id="ai-review-card" class="card"><b>Redacted AI review</b><div class="muted">Loading…</div></section>';
+  const r=aiReview.review,status=r?.status;
+  const incident=source.kind==="case"&&source.row.intake_type!=="request";
+  const noteChoices=incident?(caseExport?.notes||[]).map(n=>`<label class="ai-source"><input type="checkbox" ${aiReview.noteIds.includes(n.id)?'checked':''} onchange="aiReviewToggleNote('${esc(n.id)}',this.checked)"><span>${esc(redactForAi(n.body).slice(0,180))}${n.body.length>180?'…':''}</span></label>`).join(""):"";
+  const terminal=["APPROVED","REJECTED","STALE"].includes(status);
+  const retentionReady=aiReviewRetentionReady(r);
+  const editable=retentionReady&&aiReview.loaded&&!aiReview.error&&(!status||status==="DRAFT"||terminal);
+  return `<section id="ai-review-card" class="card ai-review-card" aria-label="Redacted AI review">
+    <div class="ai-review-head"><div><div class="mini-l">Human-gated assistance</div><b>Redacted AI review</b></div><span class="chip">${esc(aiReviewStatus(status))}</span></div>
+    <p class="note-sm">Only the exact preview below can enter the AI queue. Files, the medical vault, linked cases, and automatic Legal/accommodation extraction are excluded.</p>
+    ${!aiReview.loaded?'<div class="muted"><span class="spin"></span> Loading review status…</div>':""}
+    ${aiReview.loaded&&!aiReview.error&&!retentionReady?'<div class="banner warn">AI review is unavailable until HR configures an approved 1–90-day retention period. No packet can be saved or queued.</div>':""}
+    ${aiReview.loaded?`<button class="btn sm ghost" ${aiReview.dirty||aiReview.hashPending?'disabled':''} onclick="refreshAiReview()">Refresh review status</button>`:""}
+    ${aiReview.loaded&&aiReview.error?'<div class="banner err">Review status could not be loaded. Retry before preparing or changing a packet.</div>':""}
+    ${editable?`<div class="ai-source-list">
+      ${incident?`<label class="ai-source"><input type="checkbox" ${aiReview.includeDescription?'checked':''} onchange="aiReviewToggleDescription(this.checked)"><span><b>Case narrative</b> · locally redact the description</span></label>${noteChoices||'<p class="note-sm">No ordinary HR notes are available.</p>'}`:`<label for="ai-curated"><b>Human-curated sanitized facts</b></label><textarea id="ai-curated" rows="5" placeholder="Enter only facts already stripped of names, IDs, contact details, locations, dates, medical details, and privileged counsel material. Separate facts with blank lines." oninput="aiReviewSet('curated',this.value)">${esc(aiReview.curated)}</textarea>`}
+      <button class="btn sm sec" onclick="buildAiReviewPreview()">Build redacted preview</button>
+    </div>`:""}
+    ${aiReviewPreviewHtml()}
+    ${editable&&aiReview.payload?`<label class="ai-attest"><input type="checkbox" ${aiReview.attestIdentifiers?'checked':''} ${aiReview.hashPending?'disabled':''} onchange="aiReviewSet('attestIdentifiers',this.checked)"> I reviewed this exact text and confirm it contains no names, IDs, contact details, locations, or dates.</label><label class="ai-attest"><input type="checkbox" ${aiReview.attestSensitive?'checked':''} ${aiReview.hashPending?'disabled':''} onchange="aiReviewSet('attestSensitive',this.checked)"> I confirm it contains no medical-vault, accommodation-sensitive, privileged counsel, linked-case, or file content.</label><div class="ai-actions"><button id="ai-review-save" class="btn sm sec" ${aiReview.busy||aiReview.hashPending?'disabled':''} onclick="saveAiReviewDraft()">Save reviewed draft</button>${status==="DRAFT"?`<button id="ai-review-queue" class="btn sm" ${aiReview.busy||aiReview.hashPending||aiReview.dirty?'disabled':''} onclick="queueAiReview()">Queue approved packet</button>`:""}</div>`:""}
+    ${["QUEUED","PROCESSING"].includes(status)?'<div class="banner info">The approved redacted packet is waiting for the scheduled review run. No official case field changes automatically.</div>':""}
+    ${status==="PENDING"?`<div class="ai-suggestion"><label>Suggested synopsis</label><textarea rows="5" oninput="aiReviewSet('synopsis',this.value)">${esc(aiReview.synopsis)}</textarea><div>${aiDecisionChoice('synopsisDecision','APPROVED','Approve synopsis')}${aiDecisionChoice('synopsisDecision','REJECTED','Reject synopsis')}</div><label>Suggested severity</label><div class="banner info">${esc(r.suggested_severity||'Needs review')}${r.supporting_evidence_refs?.length?` · evidence ${esc(r.supporting_evidence_refs.join(', '))}`:""}</div><select onchange="aiReviewSet('severity',this.value)"><option value="">Choose official severity</option>${RISKS.map(v=>`<option ${aiReview.severity===v?'selected':''}>${v}</option>`).join('')}</select><div>${aiDecisionChoice('severityDecision','APPROVED','Approve selected severity')}${aiDecisionChoice('severityDecision','REJECTED','Reject severity')}</div>${r.uncertainty?`<div class="banner warn"><b>Uncertainty:</b> ${esc(r.uncertainty)}</div>`:""}${r.limitations?`<p class="note-sm"><b>Limitations:</b> ${esc(r.limitations)}</p>`:""}<button class="btn sm" ${aiReview.busy?'disabled':''} onclick="decideAiReview()">Record both decisions</button></div>`:""}
+    ${status==="APPROVED"?'<div class="banner ok">Human decisions recorded. Only explicitly approved fields were applied.</div>':""}
+    ${source.kind==="legal"&&r?.last_approved_synopsis?`<div class="banner info"><b>Current approved AI-assisted synopsis</b><div>${esc(r.last_approved_synopsis)}</div>${r.last_approved_at?`<div class="note-sm">Approved ${esc(fmt(r.last_approved_at))}</div>`:""}</div>`:""}
+    ${status==="REJECTED"?`<div class="banner warn">${r.last_error_code?'The automated review failed or was rejected. Build a new reviewed packet to retry.':'Both suggestions were rejected. Build a new reviewed packet for another review.'}</div>`:""}
+    ${status==="STALE"?'<div class="banner warn">The source facts or risk changed. Re-open this case and build a new redacted packet.</div>':""}
+    ${aiReview.error?`<div class="banner err">${esc(aiReview.error)}</div>`:""}
+    ${terminal?'<p class="note-sm">A new review requires rebuilding and re-attesting the exact payload.</p>':""}
+  </section>`;
+}
+
 // ---- case detail ----
 function partyEditHtml(){
   if (!partyEditor.open) return "";
@@ -3737,9 +3996,10 @@ async function renderCaseDetailInto(el, id){
     // email-intake attachment metadata (migration 019) — degrades to empty pre-019
     sb.from("case_files").select("*").eq("case_id",id).order("created_at",{ascending:true}),
     messageAttachmentAction({action:"list",mode:"handler",caseId:id}),
+    sb.rpc("case_link_list",{p_origin_kind:"case",p_origin_id:id}),
   ]);
   const [{data:c}, {data:parties}, {data:events}, {data:tasks}, {data:messages}, {data:notes},
-         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}, messageResult] = detailResults;
+         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}, messageResult, linkResult] = detailResults;
   const detailLabels = ["case", "team members", "timeline", "tasks", "messages", "HR notes",
     "allegations", "interviews", "corrective actions", "email attachments"];
   const exportLoadErrors = detailResults.slice(0,detailLabels.length).flatMap((result, index)=>result.error ? [detailLabels[index]] : []);
@@ -3760,7 +4020,8 @@ async function renderCaseDetailInto(el, id){
   // everything the .zip export needs — snapshot of what this view fetched
   caseExport = { c, parties: parties||[], events: events||[], tasks: tasks||[], messages: messages||[],
                  notes: notes||[], allegations: allegs||[], interviews: ivs||[], actions: actions||[],
-                 files: cfiles||[], exportLoadErrors, handlerName };
+                 files: cfiles||[], relatedLinks:linkResult.data||[], linkError:linkResult.error?"Linked cases are not available until the latest migration is deployed.":"", exportLoadErrors, handlerName };
+  aiReviewInit("case",c);
   // Loose transitions for both lifecycles; Reopened only offered from Closed.
   const nexts = isReq
     ? (c.state==="Closed" ? ["Assigned"] : REQ_STATES.filter(s=>s!==c.state))
@@ -3835,6 +4096,7 @@ async function renderCaseDetailInto(el, id){
       ${!nexts.length&&!canClose?'<span class="muted">Case is closed.</span>':""}
     </div>
   </div>
+  ${caseLinkedCasesCard(c)}
   <div class="card"><b>Follow-up tasks &amp; SLAs</b><div style="margin-top:10px">
     ${(tasks||[]).length?tasks.map(t=>{const over=t.status==="open"&&t.due_at&&new Date(t.due_at).getTime()<now;
       return `<div class="task">
@@ -3925,6 +4187,7 @@ async function renderCaseDetailInto(el, id){
     </div>
     <div style="margin-top:10px"><button class="btn sm" onclick="addActionUI('${c.id}')">Add corrective action</button></div>
   </div>`:""}
+  ${aiReviewCardHtml()}
   <div class="card"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><b>HR notes</b> <span class="chip">internal — visible to the HR team only</span>
     <button class="btn sm ghost" style="margin-left:auto" onclick="toggleGuide()">${showGuide?'Hide guide':L(c,'guide')}</button></div>
     ${showGuide?(isReq?processGuideHtml():interviewGuideHtml()):""}
@@ -3944,6 +4207,7 @@ async function renderCaseDetailInto(el, id){
   // accommodation requests only — the medical vault panel no longer renders,
   // or triggers the authenticator flow, on incident cases.
   if(isReq&&(medicalPanel.caseId!==id||medicalPanel.status==="idle")) void loadMedicalPanel(id);
+  void loadAiReview("case",c);
 }
 
 function medicalPanelShellHtml(caseId){
