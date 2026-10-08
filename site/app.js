@@ -441,6 +441,8 @@ let evidenceRetry = { caseId:null, files:[] };
 let activeUserId = null, sessionEpoch = 0;
 let interviewSavePromises = new Map();
 let interviewDrafts = new Map();
+let caseFileTitles = {caseId:null, rows:[], error:"", edits:new Map()};
+let caseLocationEdit = {caseId:null, open:false, value:"", busy:false, error:""};
 let statementTemplatePromise = null;
 const MEDICAL_FUNCTION = "medical-documents";
 const MEDICAL_FILE_RULES = { maxBytes:10*1024*1024, mimeByExtension:{
@@ -515,6 +517,7 @@ function resetSessionState(preserveMedicalInvite=false){
   caseExportInProgress = false; caseExportGeneration += 1;
   lookup = { query:"", picked:null, result:null, err:"" };
   evidence = { list:[], err:"" }; evidenceRetry = { caseId:null, files:[] };
+  resetCaseMetadata();
   partySearchResults = []; partySearchError = "";
   partyEditor = { open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
   interviewSavePromises.clear();
@@ -765,6 +768,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
+  toggleCaseLocation, setCaseLocationDraft, saveCaseLocation, toggleFileTitle, setFileTitleDraft, saveFileTitle,
   syncInterviewDraft, addInterviewPair, removeInterviewPair, moveInterviewPair, downloadBlankStatement, downloadFilledStatement,
   logInterviewContactAttempt, removeInterviewContactAttempt, exportInterviewPdf, setPeriodFilter,
   toggleTask, evDownload, evPreview, caseFileDownload, caseFilePreview,
@@ -3239,6 +3243,7 @@ async function downloadMessageAttachment(caseId,claimCode,attachmentId,name,case
 function clearSelectedCaseState(){
   selected=null; pendingAdvance=null; showReassign=false; showGuide=false;
   caseExport=null; caseAllegs=[]; evidence={list:[],err:""};
+  resetCaseMetadata();
   interviewDrafts.clear();
   partyEditor={ open:false, caseId:null, expectedUpdatedAt:null, parties:[], query:"", role:"subject", busy:false, err:"" };
   medicalPanel=blankMedicalPanel();
@@ -3997,15 +4002,18 @@ async function renderCaseDetailInto(el, id){
     sb.from("case_files").select("*").eq("case_id",id).order("created_at",{ascending:true}),
     messageAttachmentAction({action:"list",mode:"handler",caseId:id}),
     sb.rpc("case_link_list",{p_origin_kind:"case",p_origin_id:id}),
+    sb.from("case_evidence_titles").select("storage_path,title").eq("case_id",id),
   ]);
   const [{data:c}, {data:parties}, {data:events}, {data:tasks}, {data:messages}, {data:notes},
-         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}, messageResult, linkResult] = detailResults;
+         {data:allegs}, {data:ivs}, {data:actions}, {data:cfiles}, messageResult, linkResult, titlesResult] = detailResults;
   const detailLabels = ["case", "team members", "timeline", "tasks", "messages", "HR notes",
     "allegations", "interviews", "corrective actions", "email attachments"];
   const exportLoadErrors = detailResults.slice(0,detailLabels.length).flatMap((result, index)=>result.error ? [detailLabels[index]] : []);
   if (epoch !== sessionEpoch || selected !== id || !el.isConnected) return;  // stale-paint/session guard
   caseAllegs = allegs || [];   // used by the close modal gate
   if(!c){ el.innerHTML=`<button class="back" onclick="closeCase()">← Back</button><div class="card"><div class="banner warn">This case isn't available to you.</div></div>`; return; }
+  caseFileTitles = {caseId:id, rows:titlesResult.data||[], error:titlesResult.error?"Upload titles are unavailable until the portal update is applied.":"", edits:new Map()};
+  caseLocationEdit = {caseId:id, open:false, value:c.location||"", busy:false, error:""};
   const thread=ensureMessageThread(id,null);
   if(messageResult.error) thread.error="Messages could not be refreshed. "+messageResult.error.message;
   else {thread.messages=messageResult.data?.messages||[];thread.error="";}
@@ -4038,7 +4046,7 @@ async function renderCaseDetailInto(el, id){
       <div class="col">
         <div class="kv"><span class="k">${L(c,'reporter')}</span>${c.anonymous?'<span class="chip">Anonymous — contact info hidden, system emails them updates</span>':`<b id="case-requester-line">${esc(requesterLine(c)||'—')}</b>${cdRequesterToggleHtml(c)}`}</div>
         <div id="cd-requester-slot">${cdRequesterHtml(c)}</div>
-        <div class="kv"><span class="k">Location</span><span>${esc(c.location||'—')}</span></div>
+        <div id="case-location-slot">${caseLocationHtml(c)}</div>
         ${!isReq?`<div class="kv"><span class="k">Occurred</span><span>${c.incident_date?esc(c.incident_date):'—'}</span></div>
         <div class="kv"><span class="k">Relationship</span><span>${esc(c.reporter_relationship||'—')}${c.reporter_role?' · '+esc(c.reporter_role):''}</span></div>
         <div class="kv"><span class="k">Involved</span><span id="party-summary">${(parties||[]).map(partyLineHtml).join(", ")||'—'}</span> <button id="party-editor-toggle" class="btn sm ghost" style="margin-left:8px" onclick="togglePartyEditor()">${partyEditor.open?'Close editor':'Edit team members'}</button></div>
@@ -4130,7 +4138,7 @@ async function renderCaseDetailInto(el, id){
   </div>
   ${(cfiles||[]).length?`<div class="card"><b>Files</b> <span class="chip">received by email</span>
     <div style="margin-top:10px">${(cfiles||[]).map(f=>`<div class="task">
-      <span>${esc(f.file_name)}<span class="muted" style="font-size:11px"> · ${fmtBytes(f.size_bytes)}${f.source==='email'?' · email':''}${f.uploaded_by?' · from '+esc(f.uploaded_by):''}</span></span>
+      <span>${f.storage_path?fileTitleSlot(c.id,f.storage_path,f.file_name):esc(f.file_name)}<span class="muted" style="font-size:11px"> · ${fmtBytes(f.size_bytes)}${f.source==='email'?' · email':''}${f.uploaded_by?' · from '+esc(f.uploaded_by):''}</span></span>
       <span class="due">${f.created_at?fmt(f.created_at):''}</span>
       ${f.storage_path
         ? `<span class="file-actions">${attachmentKind(f.file_name)!=="download"?`<button id="case-file-preview-${esc(f.id)}" class="btn sm sec" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" data-t="${esc(f.mime_type||'')}" onclick="caseFilePreview(this.dataset.p,this.dataset.n,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-p="${esc(f.storage_path)}" data-n="${esc(f.file_name)}" onclick="caseFileDownload(this.dataset.p,this.dataset.n)">Download</button></span>`
@@ -4140,7 +4148,7 @@ async function renderCaseDetailInto(el, id){
     </div>`).join("")}
     <p class="note-sm" style="margin-top:8px">Files that arrived by email. Ones too large to store open in the peoplesupport@ mailbox instead (original emails are retained there).</p>
     </div></div>`:""}
-  ${!isReq?`<div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><b>Interviews</b> <span class="chip">internal — HR team only</span><button class="btn sm ghost" style="margin-left:auto" onclick="downloadBlankStatement()">Download blank ER statement</button></div>
+  ${!isReq?`<details class="card interview-section" open><summary><b>Interviews</b> <span class="chip">internal — HR team only</span></summary><button class="btn sm ghost" style="margin-top:8px" onclick="downloadBlankStatement()">Download blank ER statement</button>
     <p class="note-sm" style="margin-top:4px">Working notes stay editable and separate from the statement responses. Every structured response and local interview detail is saved with this interview.</p>
     <div style="margin-top:10px">
     ${(ivs||[]).length?(ivs||[]).map(iv=>interviewEditorHtml(c.id,iv)).join(""):'<p class="muted">No interviews yet.</p>'}
@@ -4160,7 +4168,7 @@ async function renderCaseDetailInto(el, id){
       <span><span class="mini-l">Interviewer</span><input id="ni-by" type="text" value="${esc(me?.name||'')}"></span>
     </div>
     <div style="margin-top:10px"><button class="btn sm" onclick="addInterviewUI('${c.id}')">Add interview</button></div>
-  </div>
+  </details>
   <div class="card"><b>Corrective Actions</b> <span class="chip">restricted — HR team only</span>
     <div style="margin-top:10px">
     ${(actions||[]).length?(actions||[]).map(a=>`
@@ -4417,13 +4425,69 @@ async function loadMedicalAudit(caseId,append=false){if(medicalPanel.auditStatus
 async function previewMedicalRetention(caseId){const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"retention_preview",caseId,limit:100});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"Retention preview could not be loaded.");return;}medicalPanel.retention=result.data?.candidates||[];paintMedicalPanel();}
 async function enqueueMedicalRetention(caseId){const ids=[...document.querySelectorAll("[data-medical-retention-id]:checked")].map(el=>el.dataset.medicalRetentionId).filter(Boolean);if(!ids.length){alert("Select at least one dry-run candidate.");return;}const reason=prompt("Reason for queueing these records for retention review:","");if(reason===null||!reason.trim())return;const epoch=sessionEpoch,userId=session?.user?.id,generation=medicalPanel.generation,result=await medicalAction({action:"retention_enqueue",caseId,documentIds:ids,reason:reason.trim()});if(!medicalCurrent(caseId,generation,epoch,userId))return;if(result.error){alert(result.error.message||"The retention review could not be queued.");return;}alert(`${result.data?.queued?.length||0} document(s) queued for review. No files were deleted.`);await previewMedicalRetention(caseId);}
 
+function resetCaseMetadata(){
+  caseFileTitles={caseId:null,rows:[],error:"",edits:new Map()};
+  caseLocationEdit={caseId:null,open:false,value:"",busy:false,error:""};
+}
+function caseLocationHtml(c){
+  const st=caseLocationEdit;
+  return `<div class="kv"><span class="k">Location</span><span>${esc(c.location||'—')}</span><button class="btn sm ghost" onclick="toggleCaseLocation()" ${st.busy?'disabled':''}>${st.open?'Cancel':'Edit location'}</button></div>`+
+    (st.open?`<div class="metadata-editor"><label for="case-location-input">Case location</label>${locationPicker("case-location-input",st.value,"setCaseLocationDraft",c.intake_type==='request')}<button class="btn sm" onclick="saveCaseLocation()" ${st.busy?'disabled':''}>${st.busy?'Saving…':'Save location'}</button><p role="status" class="note-sm">${esc(st.error)}</p></div>`:'');
+}
+function paintCaseLocation(){const slot=$("case-location-slot");if(slot&&caseExport?.c)slot.innerHTML=caseLocationHtml(caseExport.c);}
+function toggleCaseLocation(){
+  const c=caseExport?.c;if(!c||caseLocationEdit.caseId!==c.id||caseLocationEdit.busy)return;
+  caseLocationEdit.open=!caseLocationEdit.open;caseLocationEdit.error="";caseLocationEdit.value=c.location||"";paintCaseLocation();
+}
+function setCaseLocationDraft(value){caseLocationEdit.value=value;}
+async function saveCaseLocation(){
+  const c=caseExport?.c,st=caseLocationEdit;if(!c||st.caseId!==c.id||st.busy)return;
+  const value=canonicalLocation(st.value,c.intake_type!=='request');
+  if(value===null){st.error=locationError(c.intake_type!=='request');paintCaseLocation();return;}
+  const epoch=sessionEpoch;st.busy=true;st.error="";paintCaseLocation();
+  let result;try{result=await sb.rpc("set_case_location",{p_case_id:c.id,p_location:value||null,p_expected_location:c.location??null});}catch(error){result={error};}
+  if(epoch!==sessionEpoch||selected!==c.id||caseLocationEdit!==st||caseExport?.c!==c)return;
+  st.busy=false;
+  if(result.error){st.error=errText(result.error);paintCaseLocation();return;}
+  const row=Array.isArray(result.data)?result.data[0]:result.data;
+  if(!row||!Object.hasOwn(row,"location")){st.error="The location update was not confirmed. Reload the case before trying again.";paintCaseLocation();return;}
+  c.location=row.location;c.us_state=row.us_state??null;st.open=false;paintCaseLocation();
+}
+const fileTitleId=path=>`file-title-${encodeURIComponent(path)}`;
+function savedFileTitle(path){return caseFileTitles.rows.find(row=>row.storage_path===path)?.title??null;}
+function fileTitleSlot(caseId,path,original){return `<span class="file-title" id="${esc(fileTitleId(path))}">${fileTitleHtml(caseId,path,original)}</span>`;}
+function fileTitleHtml(caseId,path,original){
+  const title=savedFileTitle(path),edit=caseFileTitles.edits.get(path);
+  if(edit)return `<label for="${esc(fileTitleId(path))}-input">Display title</label><input id="${esc(fileTitleId(path))}-input" type="text" maxlength="240" value="${esc(edit.value)}" data-p="${esc(path)}" oninput="setFileTitleDraft(this.dataset.p,this.value)" ${edit.busy?'disabled':''}><span class="file-actions"><button class="btn sm" data-p="${esc(path)}" onclick="saveFileTitle(this.dataset.p)" ${edit.busy?'disabled':''}>${edit.busy?'Saving…':'Save title'}</button><button class="btn sm ghost" data-p="${esc(path)}" data-n="${esc(original)}" onclick="toggleFileTitle(this.dataset.p,this.dataset.n)" ${edit.busy?'disabled':''}>Cancel</button></span><span role="status" class="note-sm">${esc(edit.error)}</span>`;
+  return `<span>${esc(title||original)}</span>${title?`<span class="note-sm" style="display:block">Original: ${esc(original)}</span>`:''}<button class="btn sm ghost" data-p="${esc(path)}" data-n="${esc(original)}" onclick="toggleFileTitle(this.dataset.p,this.dataset.n)" ${caseFileTitles.error?'disabled':''}>Edit title</button>`;
+}
+function paintFileTitle(path,original){const slot=$(fileTitleId(path));if(slot)slot.innerHTML=fileTitleHtml(caseFileTitles.caseId,path,original);}
+function toggleFileTitle(path,original){
+  if(caseFileTitles.caseId!==selected||caseFileTitles.error)return;
+  const edit=caseFileTitles.edits.get(path);if(edit?.busy)return;
+  if(edit)caseFileTitles.edits.delete(path);else caseFileTitles.edits.set(path,{value:savedFileTitle(path)||original,original,expected:savedFileTitle(path),busy:false,error:""});
+  paintFileTitle(path,original);
+}
+function setFileTitleDraft(path,value){const edit=caseFileTitles.edits.get(path);if(edit&&!edit.busy)edit.value=value;}
+async function saveFileTitle(path){
+  const state=caseFileTitles,edit=state.edits.get(path),caseId=selected,epoch=sessionEpoch;
+  if(!edit||edit.busy||state.caseId!==caseId)return;
+  const title=edit.value.trim();if(!title||title.length>240){edit.error="Enter a display title from 1 to 240 characters.";paintFileTitle(path,edit.original);return;}
+  edit.busy=true;edit.error="";paintFileTitle(path,edit.original);
+  let result;try{result=await sb.rpc("set_case_evidence_title",{p_case_id:caseId,p_storage_path:path,p_title:title,p_expected_title:edit.expected});}catch(error){result={error};}
+  if(epoch!==sessionEpoch||selected!==caseId||caseFileTitles!==state)return;
+  edit.busy=false;if(result.error){edit.error=errText(result.error);paintFileTitle(path,edit.original);return;}
+  const row=Array.isArray(result.data)?result.data[0]:result.data;
+  if(!row||row.storage_path!==path||row.title!==title){edit.error="The title update was not confirmed. Reload the case before trying again.";paintFileTitle(path,edit.original);return;}
+  state.rows=state.rows.filter(item=>item.storage_path!==path);state.rows.push({storage_path:path,title:row.title});state.edits.delete(path);paintFileTitle(path,edit.original);
+}
 function evidenceHtml(caseId){
   if(evidence.err) return `<span class="muted">${esc(evidence.err)}</span>`;
   if(!evidence.list.length) return '<span class="muted">No evidence uploaded.</span>';
-  return evidence.list.map((f,index)=>{const display=f.name.replace(/^\d+_/,''),kind=attachmentKind(display,f.metadata?.mimetype||"");return `<div class="task"><span>${esc(display)}</span>
+  return evidence.list.map((f,index)=>{const display=f.name.replace(/^\d+_/,''),kind=attachmentKind(display,f.metadata?.mimetype||"");return `<div class="task"><span>${fileTitleSlot(caseId,`${caseId}/${f.name}`,display)}</span>
       <span class="due">${f.created_at?fmt(f.created_at):''}</span>
       <span class="file-actions">${kind!=="download"?`<button id="evidence-preview-${index}" class="btn sm sec" data-n="${esc(f.name)}" data-d="${esc(display)}" data-t="${esc(f.metadata?.mimetype||'')}" onclick="evPreview('${caseId}',this.dataset.n,this.dataset.d,this.dataset.t,this.id)">Preview</button>`:""}<button class="btn sm ghost" data-n="${esc(f.name)}" onclick="evDownload('${caseId}',this.dataset.n)">Download</button></span></div>`;}).join("")
-    + `<p class="note-sm" style="margin-top:8px">Files are locked once submitted — you can download them but not edit or replace them (audit integrity). Use the Interviews section for working notes and questions.</p>`;
+    + `<p class="note-sm" style="margin-top:8px">You can edit display titles. Original files and filenames stay unchanged for audit integrity.${caseFileTitles.error?' '+esc(caseFileTitles.error):''}</p>`;
 }
 // ---- email-intake files (case_files, migration 019) -------------------------
 const fmtBytes = n => (n==null || isNaN(n)) ? "—"
@@ -4582,8 +4646,8 @@ function interviewDraft(iv){
 function interviewEditorHtml(caseId,iv){
   const d=interviewDraft(iv);
   const code=interviewCode(caseExport,iv.id);
-  return `<div class="iv-row" id="iv-${iv.id}">
-    ${code?`<div style="margin-bottom:8px"><span class="chip">${esc(code)}</span></div>`:""}
+  return `<details class="iv-row interview-editor" id="iv-${iv.id}" open>
+    <summary>${code?`<span class="chip">${esc(code)}</span> `:""}${esc(d.interviewee||"Interview")} · ${esc(d.status)}${d.date?' · '+esc(d.date):''}</summary>
     <div class="iv-grid">
       <span><span class="mini-l">Person interviewed</span><input id="iv-name-${iv.id}" type="text" value="${esc(d.interviewee)}" oninput="syncInterviewDraft('${iv.id}')"></span>
       <span><span class="mini-l">Role in case</span><select id="iv-role-${iv.id}" onchange="syncInterviewDraft('${iv.id}')">${[...new Set([...PARTY_ROLES,...(d.role?[d.role]:[]),"Other"])].map(r=>`<option value="${esc(r)}" ${d.role===r?'selected':''}>${esc(rlabel(r))}</option>`).join("")}</select></span>
@@ -4616,7 +4680,7 @@ function interviewEditorHtml(caseId,iv){
     <label class="mini-l" for="iv-notes-${iv.id}" style="margin-top:10px">Working notes (not copied into statement responses)</label>
     <textarea id="iv-notes-${iv.id}" style="min-height:90px" oninput="syncInterviewDraft('${iv.id}')" onblur="saveInterviewUI('${caseId}','${iv.id}',true)">${esc(d.notes)}</textarea>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="saveInterviewUI('${caseId}','${iv.id}')">Save</button><button class="btn sm ghost" onclick="downloadFilledStatement('${caseId}','${iv.id}')">Download filled statement</button><button class="btn sm ghost" onclick="exportInterviewPdf('${caseId}','${iv.id}')">Export interview (PDF)</button><span class="muted" id="iv-saved-${iv.id}" style="font-size:12px;align-self:center"></span><button class="btn sm ghost" style="margin-left:auto" onclick="deleteInterviewUI('${iv.id}')">Remove</button></div>
-  </div>`;
+  </details>`;
 }
 function syncInterviewDraft(id){
   const d=interviewDrafts.get(id); if(!d)return;
@@ -4624,7 +4688,7 @@ function syncInterviewDraft(id){
   for(const [key,field] of Object.entries({interviewee:"name",role:"role",date:"date",time:"time",timezone:"zone",format:"format",duration:"duration",title:"title",location:"location",interviewer:"by",status:"status",followUp:"fu",opening:"opening",closing:"closing",notes:"notes",caNew:"ca-new"})) if(read(field)!=null)d[key]=read(field);
   d.pairs.forEach(pair=>{const q=$(`iv-q-${id}-${pair.id}`),a=$(`iv-a-${id}-${pair.id}`);if(q)pair.question=q.value;if(a)pair.response=a.value;});
 }
-function rerenderInterview(caseId,id){ syncInterviewDraft(id); const row=$(`iv-${id}`),iv=caseExport?.interviews?.find(item=>item.id===id); if(row&&iv){row.outerHTML=interviewEditorHtml(caseId,iv);setInterviewContactBusy(id,!!interviewDrafts.get(id)?.attemptPromise);} }
+function rerenderInterview(caseId,id){ syncInterviewDraft(id); const row=$(`iv-${id}`),iv=caseExport?.interviews?.find(item=>item.id===id); if(row&&iv){const open=row.open;row.outerHTML=interviewEditorHtml(caseId,iv);$(`iv-${id}`).open=open;setInterviewContactBusy(id,!!interviewDrafts.get(id)?.attemptPromise);} }
 function addInterviewPair(caseId,id){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d||d.pairs.length>=50)return;d.pairs.push({id:crypto.randomUUID(),question:"",response:""});rerenderInterview(caseId,id);}
 function removeInterviewPair(caseId,id,index){syncInterviewDraft(id);const d=interviewDrafts.get(id);if(!d)return;d.pairs.splice(index,1);rerenderInterview(caseId,id);}
 function moveInterviewPair(caseId,id,index,delta){syncInterviewDraft(id);const d=interviewDrafts.get(id),to=index+delta;if(!d||to<0||to>=d.pairs.length)return;[d.pairs[index],d.pairs[to]]=[d.pairs[to],d.pairs[index]];rerenderInterview(caseId,id);}
