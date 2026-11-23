@@ -768,7 +768,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setRememberDevice,
   setF, setIncidentLocation, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
   startEmployeeTest, endEmployeeTest, openEmployeeTestStatus,
-  setDashView, sbEditSetting, sbCancelSetting, sbSaveSetting, sbOpenPolicyForm, sbClosePolicyForm, sbSavePolicy, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
+  setDashView, sbEditSetting, sbCancelSetting, sbSaveSetting, sbOpenPolicyForm, sbClosePolicyForm, sbSavePolicy, sbLoadFeeds, sbCloseAttestation, sbRecordLaunch, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
@@ -1890,6 +1890,60 @@ async function sbSavePolicy(){
   if (data?.id){ const i = sbPolicies.findIndex(x => x.id === data.id); if (i >= 0) sbPolicies[i] = data; else sbPolicies.push(data); }
   sbPolicyEditing = null; sbRepaintPolicy();
 }
+let sbFeedRequest = 0;
+async function sbLoadFeeds(closed=false, offset=0){
+  const tile = $("sb-tile-attest"), quarterly = $("sb-tile-checkins");
+  if (!scoreboardEnabled || !tile || !quarterly) return;
+  const epoch = sessionEpoch, request = ++sbFeedRequest;
+  const {data, error} = await sb.rpc("hr_scoreboard_feeds",{p_closed:closed,p_offset:offset});
+  if (epoch !== sessionEpoch || request !== sbFeedRequest || !tile.isConnected) return;
+  if (error || !data){
+    tile.textContent = "Attestation records could not be loaded.";
+    quarterly.textContent = "Quarterly check-ins could not be loaded.";
+    return;
+  }
+  const quarters = data.quarters || [];
+  quarterly.innerHTML = '<div class="mini-l">Quarterly check-ins</div>' + (quarters.length ? quarters.map(q=>{
+    const percent = q.assigned ? (100*q.completed/q.assigned).toFixed(1)+"%" : "—";
+    return `<div class="kv"><b>${esc(q.quarter)} · ${esc(percent)}</b><span>${q.assigned==null?'Assignment count unverified':`${esc(q.completed)} of ${esc(q.assigned)} complete`}</span></div>
+      <div class="note-sm">Launch ${q.launch_date?esc(fmtDateOnly(q.launch_date)):"date unverified"} · Source updated ${esc(fmtDateOnly(q.as_of))} · ${esc(q.source_label)}</div>
+      ${q.coverage_note?`<div class="note-sm">${esc(q.coverage_note)}</div>`:""}
+      ${q.quarter==="Current tracker"?"":`<details><summary>Record launch date</summary><label>Launch date<input type="date" value="${esc(q.launch_date||"")}"></label><button class="btn sm ghost" data-quarter="${esc(q.quarter)}" onclick="sbRecordLaunch(this)">Save date</button></details>`}`;
+  }).join("") : '<p class="note-sm">Awaiting a verified quarterly completion report.</p>');
+  const rows = data.rows || [];
+  const details = rows.map(r=>`<li style="margin:10px 0">
+    <b>${esc(r.category)}</b> · ${esc(fmtDateOnly(r.shift_date))}
+    <div>UKG person ${esc(r.person_number)} · ${esc(r.store_code||"Store unavailable")}</div>
+    ${r.closed_at ? `<span class="muted">Closed as false positive · ${esc(new Date(r.closed_at).toLocaleDateString())}</span>`
+      : `<button class="btn sm ghost" data-key="${esc(r.source_key)}" onclick="sbCloseAttestation(this)">Close as false positive</button>`}
+  </li>`).join("");
+  const review = data.reviewer ? `<div style="margin-top:12px"><button class="btn sm ghost" aria-pressed="${!closed}" onclick="sbLoadFeeds(false,0)">Open (${Number(data.open_count)})</button>
+    <button class="btn sm ghost" aria-pressed="${closed}" onclick="sbLoadFeeds(true,0)">False positives (${Number(data.closed_count)})</button></div>
+    ${rows.length ? '<ul>'+details+'</ul>' : '<p class="note-sm">No records in this view.</p>'}
+    ${offset>0?`<button class="btn sm ghost" onclick="sbLoadFeeds(${closed},${Math.max(0,offset-25)})">Previous</button>`:""}
+    ${offset+rows.length<Number(data.page_count)?`<button class="btn sm ghost" onclick="sbLoadFeeds(${closed},${offset+25})">Next</button>`:""}` : "";
+  tile.innerHTML = `<div class="mini-l">Attestation flags</div>
+    <p>${data.attestation_through ? `<b>${Number(data.open_count)} open</b> · UKG through ${esc(fmtDateOnly(data.attestation_through))}` : "Awaiting the first verified UKG refresh."}</p>${review}`;
+}
+async function sbRecordLaunch(button){
+  const date = button.closest("details")?.querySelector("input")?.value;
+  if (!scoreboardEnabled || !date || button.disabled) return;
+  const epoch=sessionEpoch;
+  button.disabled=true;
+  const {error}=await sb.rpc("hr_checkin_launch",{p_quarter:button.dataset.quarter,p_date:date});
+  if (epoch!==sessionEpoch || !button.isConnected) return;
+  if (error){button.disabled=false; alert(errText(error)); return;}
+  await sbLoadFeeds();
+}
+async function sbCloseAttestation(button){
+  if (!scoreboardEnabled || button.disabled || !confirm("Close this flag as a false positive? Your review date will be recorded.")) return;
+  const epoch=sessionEpoch;
+  button.disabled=true;
+  const {error}=await sb.rpc("hr_attestation_close",{p_key:button.dataset.key});
+  if (epoch!==sessionEpoch || !button.isConnected) return;
+  if (error){button.disabled=false; alert(errText(error)); return;}
+  await sbLoadFeeds(false,0);
+}
 async function renderScoreboardInto(el){
   const epoch = sessionEpoch, dv = dashView;
   const [s, p] = await Promise.all([
@@ -1906,10 +1960,11 @@ async function renderScoreboardInto(el){
     <div class="grid2" style="margin-top:14px">
       <div class="card" id="sb-tile-paga">${sbSettingTileHtml("paga_last_audit")}</div>
       <div class="card" id="sb-tile-handbook">${sbSettingTileHtml("handbook_next_publish")}</div>
-      <div class="card" id="sb-tile-checkins">${sbPlaceholderTile("Quarterly check-ins","Not connected yet — coming once the UKG check-in feed is set up")}</div>
-      <div class="card" id="sb-tile-attest">${sbPlaceholderTile("Attestation flags","Not connected yet")}</div>
+      <div class="card" id="sb-tile-checkins">${sbPlaceholderTile("Quarterly check-ins","Loading…")}</div>
+      <div class="card" id="sb-tile-attest">${sbPlaceholderTile("Attestation flags","Loading…")}</div>
     </div>
     <div class="card" id="sb-tile-policy" style="margin-top:14px">${sbPolicyTileHtml()}</div>`;
+  await sbLoadFeeds();
 }
 // One toggle row for every dashboard tab (was copied into three renderers).
 function dashToggleHtml(active){

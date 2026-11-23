@@ -1,16 +1,16 @@
 # Source release
 
-- Release ID: `legal-invoices-20261123`
+- Release ID: `hr-scoreboard-20261123`
 - Exported: 2026-11-23
-- Private source commit: `57526f7e90e6491d0dd7414876ff73b2942f07d3` (PR #55)
+- Private source commit: `a68c56e0d67756de464fe91d18f937afb3035eb8` (PR #56)
 - Scope: 10 reviewed static browser files; no source history or application data
 
 ## SHA-256
 
 | File | SHA-256 |
 |---|---|
-| `site/app.js` | `eceb2a99a01388adc368e574c44fa70bfcc602b11a78026c793b4b59562a6246` |
-| `site/config.js` | `6af3ce79b3ee89191ae02f1b93915f780fe73c196e20cbfe3ece4a4d7c93c258` |
+| `site/app.js` | `16bbaebf4e19acea4dde85d4b8ed85b22f4426c66ffc902e7152c494f743330d` |
+| `site/config.js` | `f4cb6a7949199ee1aa3b15dfce3c163d3bdd60101612177308f32097cf1b472f` |
 | `site/index.html` | `776ff3453df0fbd381ea871bf8c155e9e0eda8450f378b5f5f0bb28d4251a218` |
 | `site/minizip.js` | `fafe2933eef0b5aaff1c4451bc5662e81a75d6b99ceb0361495d0e9249a21a7c` |
 | `site/store_org.js` | `fd96c4cda296edbd7f4a4002555c64cb9a21798943b10c937a7534101adb89c1` |
