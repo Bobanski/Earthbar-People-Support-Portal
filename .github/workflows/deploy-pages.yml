@@ -34,13 +34,17 @@ jobs:
             site/minizip.js \
             site/store_locations.js \
             site/store_org.js)"
-          allowed_paths="$(printf '%s\n' "$core_paths" site/statement_template.js | LC_ALL=C sort)"
+          pdf_files=(pdf.min.mjs pdf.worker.min.mjs pdfjs-LICENSE.txt)
+          allowed_paths="$(printf '%s\n' "$core_paths" site/statement_template.js "${pdf_files[@]/#/site/}" | LC_ALL=C sort)"
           expected_paths="$core_paths"
           files=(app.js config.js index.html minizip.js store_locations.js store_org.js)
           if test -f site/statement_template.js; then
-            expected_paths="$allowed_paths"
             files+=(statement_template.js)
           fi
+          if grep -q 'pdf[.]min[.]mjs' site/app.js || test -f site/pdf.min.mjs || test -f site/pdf.worker.min.mjs || test -f site/pdfjs-LICENSE.txt; then
+            files+=("${pdf_files[@]}")
+          fi
+          expected_paths="$(printf '%s\n' .github/workflows/deploy-pages.yml README.md SOURCE_RELEASE.md "${files[@]/#/site/}" | LC_ALL=C sort)"
           actual_paths="$(find . -path './.git' -prune -o -type f -printf '%P\n' | LC_ALL=C sort)"
           history_paths="$(git log --all --pretty=format: --name-only | sed '/^$/d' | LC_ALL=C sort -u)"
           test "$actual_paths" = "$expected_paths"
