@@ -31,6 +31,9 @@ import { makeZip } from "./minizip.js";
 import { ER_STATEMENT_GUIDE, STATEMENT_TEMPLATE_FILENAME, STATEMENT_TEMPLATE_BUCKET, STATEMENT_TEMPLATE_OBJECT, configureStatementTemplate, clearStatementTemplate, buildBlankBlob, buildFilledBlob } from "./statement_template.js";
 
 const cfg = window.EARTHBAR_CONFIG || {};
+const scoreboardEnabled = cfg.ENABLE_HR_SCOREBOARD === true;
+const incidentReceiptEnabled = cfg.ENABLE_INCIDENT_RECEIPT === true;
+const incidentAcknowledgmentEnabled = cfg.ENABLE_INCIDENT_ACKNOWLEDGMENT === true;
 // --- SESSION POLICY ---------------------------------------------------------
 // Default: sessionStorage + a 24h idle limit. Any signed-in user may opt in to
 // an absolute 30-day session on their device. The 30-day deadline never
@@ -281,7 +284,7 @@ const CATEGORIES = ["Manager conduct","Coworker conduct","Harassment","Discrimin
 const RELATIONSHIPS = ["Employee","Former employee","Customer","Vendor / partner","Other"];
 const REQUEST_TYPES = ["Accommodation — Religious","Accommodation — Medical","Accommodation — Other","Other request"];
 const RISKS = ["Low","Medium","High"];
-const CASE_DETAIL_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref,requester_id";
+const CASE_DETAIL_COLS = "id,ref,category,description,severity,anonymous,handler_id,external,route_reason,state,created_at,closed_at,incident_date,intake_type,location,us_state,reporter_relationship,reporter_role,reporter_display,risk_level,substantiated,substantiated_note,policies,ai_summary,manual_entry,updated_at,accommodation_status,accommodation_start,accommodation_end,accommodation_duration,closure_category,closure_ref,requester_id" + (incidentAcknowledgmentEnabled ? ",acknowledged_at" : "");
 // 8/18 sync call: "Subject" is displayed as "Implicated Person"; Witness is
 // split into firsthand / secondhand; "Reporter" added (someone reporting on
 // behalf of others). Stored values are kept stable for data continuity —
@@ -420,6 +423,7 @@ let legalLinkTimer = null;
 let caseLinkPicker = { caseId:null, query:"", results:[], linked:[], busy:false, err:"", seq:0 };
 let caseLinkTimer = null;
 let legalBusy = { note:false, upload:false };
+let legalInvoices = blankLegalInvoices();   // Legal invoice card state (see the "legal invoices" block)
 let legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" };
 let legalPreviewGeneration = 0;
 let legalPreviewRestoreName = "";
@@ -508,7 +512,7 @@ function resetSessionState(preserveMedicalInvite=false){
   legalLinkPicker = {caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1};
   caseLinkPicker = {caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:caseLinkPicker.seq+1};
   legalComposer = { caseId:null, note:"", files:[], status:"", error:"", noteError:"", retry:false }; legalBusy = { note:false, upload:false };
-  legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1;
+  legalPreview = { open:false, caseId:null, storedName:"", name:"", url:"", kind:"" }; legalPreviewGeneration += 1; legalInvoices = blankLegalInvoices();
   messageThread = blankMessageThread(); messageThreadGeneration += 1;
   closeModal = { open:false, caseId:null, kind:"incident", sub:null, status:"", note:"", cat:"", ref:"" };
   lastShown = []; caseExport = null; caseAllegs = [];
@@ -764,7 +768,7 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   setRememberDevice,
   setF, setIncidentLocation, addParty, rmParty, onPartyInput, pickPartyEmp, pickDirectoryResult, toggleRole, mToggleRole, submitIncident, submitRequest,
   startEmployeeTest, endEmployeeTest, openEmployeeTestStatus,
-  setDashView, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
+  setDashView, sbEditSetting, sbCancelSetting, sbSaveSetting, sbOpenPolicyForm, sbClosePolicyForm, sbSavePolicy, addNote, toggleGuide, saveAccommodation, toggleReassign, doReassign, setCloseStatus,
   cancelAdvance,
   addAllegationUI, setFindingUI, removeAllegationUI, addPolicyChip, removePolicyChipFromElement,
   saveInterviewUI, addInterviewUI, deleteInterviewUI, saveActionUI, addActionUI, deleteActionUI,
@@ -777,8 +781,9 @@ Object.assign(window, { go, sendOtp, verifyOtp, signOut,
   elInput, elKeyDown, elPickResult, elClear, toggleCdRequester,
   wcOpen, wcClose, wcSave, wcApplyFilters, setWcQuickFilter, clearWcFilter, clearWcFilters, setWcSort, setLegalSort,
   wcSetFiles, wcUploadDocuments, wcDownloadDocument,
-  lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
+  lgOpen, lgClose, lgEdit, lgCancelEdit, lgSave, lgEpliToggle, lgApplyFilters, setLegalQuickFilter, clearLegalFilter, clearLegalFilters,
   lgSetNoteDraft, lgSetFiles, lgAddNote, lgUploadDocuments, lgPreviewDocument, lgDownloadDocument, lgClosePreview,
+  lgInvoiceField, lgInvoiceSetFile, lgInvoiceUseSuggestion, lgInvoiceAdd, lgInvoiceToggleCounts, lgInvoiceRowStart, lgInvoiceRowCancel, lgInvoiceRowSave, lgRetentionStart, lgRetentionCancel, lgRetentionSave,
   lgLinkSearchInput, lgLinkCase, lgUnlinkCase, caseLinkSearchInput, caseLinkCreate, caseLinkRemove, openLinkedCase, lgLinkedEvidencePreview, lgLinkedEvidenceDownload,
   lgLinkedCaseFilePreview, lgLinkedCaseFileDownload, lgLinkedMessagePreview, lgLinkedMessageDownload,
   openCloseModal, cancelCloseModal, setCloseSub, setCloseCat, confirmClose,
@@ -979,7 +984,9 @@ function go(v){
 // Loose on purpose: ids only ever reach parameterized .eq("id",…) queries and
 // esc()'d DOM; a junk id just renders that view's own not-found state.
 const ROUTE_ID = /^[A-Za-z0-9_-]{1,64}$/;
-const ROUTE_DASH_VIEWS = ["cases","requests","closed","wc","legal"];
+const DASH_TABS = [["cases","Cases"],["requests","Requests"],["closed","Closed"],["wc","Workers' Comp"],["legal","Legal & Claims"]];
+if (scoreboardEnabled) DASH_TABS.push(["scoreboard","Scoreboard"]);
+const ROUTE_DASH_VIEWS = DASH_TABS.map(([key]) => key);
 let routeApplying = false, routeSyncQueued = false;
 let initialRoutePending = location.hash.startsWith("#/");
 function currentRoute(){
@@ -1361,6 +1368,15 @@ async function submitIncident(){
   view = "home";   // land back on the home screen with the confirmation on top
   render(); window.scrollTo({top:0,behavior:"smooth"});
 }
+// Named-reporter receipt wording (PSP item 5 W3). The "reply to the confirmation
+// email" sentence stays off until reply routing (migration 20261110174000 + the
+// send-email replyTo config) is live; flip this to true in the same release.
+const RECEIPT_REPLY_NOTE = false;
+function receiptNamedNote(){
+  if (!incidentReceiptEnabled) return "You submitted with your name. The assigned handler can follow up with you directly.";
+  return "You submitted with your name. We take your concerns seriously, and the assigned handler can follow up with you directly."
+    + (RECEIPT_REPLY_NOTE ? " If you haven't heard back within 2 business days, reply to the confirmation email." : "");
+}
 function renderReceipt(r){
   if(r.question) return `<div class="card"><div class="banner ok"><b>Sent to HR.</b> Reference <span class="ref">${esc(r.ref)}</span> — you'll get a reply at the email you provided.</div></div>`;
   return `<div class="card">
@@ -1370,10 +1386,10 @@ function renderReceipt(r){
     ${evidenceRetry.caseId===r.case_id && evidenceRetry.files.length
       ? `<button class="btn sm sec" onclick="retryEvidenceUploads()" ${busy?'disabled':''}>${busy?'Retrying…':`Retry ${evidenceRetry.files.length} attachment(s)`}</button>`
       : ""}
-    ${r.anonymous ? `<p class="muted">Save this claim code — it's how you check status and message HR without revealing who you are. Email updates will still reach you automatically.</p>
+    ${r.anonymous ? `<p class="muted">${incidentReceiptEnabled ? "We take your concerns seriously. " : ""}Save this claim code — it's how you check status and message HR without revealing who you are. Email updates will still reach you automatically.${incidentReceiptEnabled ? " If you haven't heard back within 2 business days, use your claim code to message HR." : ""}</p>
       <div class="codebox">${esc(r.claim_code)}</div>
       <p class="note-sm">Shown once. Check it any time under “Check my report status”.</p>`
-      : `<p class="muted">You submitted with your name. The assigned handler can follow up with you directly.</p>`}
+      : `<p class="muted">${esc(receiptNamedNote())}</p>`}
     <div class="divider"></div>
     <div class="kv"><span class="k">Routed to</span><b>${esc(r.handler)}</b>${r.external?' <span class="warnbadge" style="margin-left:8px">EXTERNAL</span>':''}</div>
     <div class="kv"><span class="k">Why</span><span>${r.route_reason==='default'?'Default handler — no conflict of interest.':r.route_reason==='conflict_reroute'?'Rerouted — the usual handler was connected to this case.':'All internal HR handlers were conflicted → external advisor.'}</span></div>
@@ -1444,7 +1460,7 @@ function applyFilters(){
   filters.q = $("flt-q")?.value ?? filters.q;
   updateDashboardResults();
 }
-function setDashView(v){ if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; wcSort={ key:"", dir:1 }; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgSort={ key:"", dir:1 }; lgEditing=false; legalDetail={notes:[],files:[],links:[],relatedLinks:[],linkedCases:{},linkedFiles:{},errors:[]}; legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; filters=blankDashboardFilters(); render(); syncRoute(); }
+function setDashView(v){ if (!ROUTE_DASH_VIEWS.includes(v)) return; if (showManual){ syncManualFields(); flushManualDraft(true); } closeAttachmentPreview(false); setLegalPreviewBackgroundInert(false); dashView=v; showManual=false; dashSort={ key:"", dir:1 }; wcSelected=null; wcFilters={ q:"", status:"", state:"", asg:"", quick:"" }; wcData=[]; wcSort={ key:"", dir:1 }; lgSelected=null; lgFilters={ q:"", state:"", risk:"", status:"", type:"", quick:"active" }; legalData=[]; lgSort={ key:"", dir:1 }; lgEditing=false; legalDetail={notes:[],files:[],links:[],relatedLinks:[],linkedCases:{},linkedFiles:{},errors:[]}; legalLinkPicker={caseId:null,query:"",results:[],linked:[],busy:false,err:"",seq:legalLinkPicker.seq+1}; legalComposer={caseId:null,note:"",files:[],status:"",error:"",noteError:"",retry:false}; legalBusy={note:false,upload:false}; legalPreview={open:false,caseId:null,storedName:"",name:"",url:"",kind:""}; legalPreviewGeneration+=1; sbEditing=null; sbPolicyEditing=null; filters=blankDashboardFilters(); render(); syncRoute(); }
 // NOTE: no select("*") on cases — reporter_email/phone are column-locked
 // server-side (anonymity guarantee); requesting them is permission-denied.
 // closure_category/closure_ref need migration 017 (granted there per 012's rule).
@@ -1666,6 +1682,7 @@ async function renderDashboardInto(el){
   const epoch = sessionEpoch;
   if (dashView === "wc") return renderWcInto(el);
   if (dashView === "legal") return renderLegalInto(el);
+  if (dashView === "scoreboard") return renderScoreboardInto(el);
   const dv = dashView;                       // stale-paint guard (QC 8/31)
   const { data:all, error } = await sb.from("cases")
     .select(DASH_CASE_COLS + ", tasks(status,due_at), case_parties(subject_id,display_name,party_type,role_in_case)")
@@ -1691,13 +1708,7 @@ async function renderDashboardInto(el){
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
-        <div class="dash-toggle">
-          <button class="${dashView==='cases'?'on':''}" aria-pressed="${dashView==='cases'}" onclick="setDashView('cases')">Cases</button>
-          <button class="${isReq?'on':''}" aria-pressed="${isReq}" onclick="setDashView('requests')">Requests</button>
-          <button class="${isClosed?'on':''}" aria-pressed="${isClosed}" onclick="setDashView('closed')">Closed</button>
-          <button aria-pressed="false" onclick="setDashView('wc')">Workers' Comp</button>
-          <button aria-pressed="false" onclick="setDashView('legal')">Legal &amp; Claims</button>
-        </div>
+        ${dashToggleHtml(dashView)}
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
          ${isClosed ? `
@@ -1744,6 +1755,165 @@ async function renderDashboardInto(el){
       <thead><tr>${dashHeadHtml(isReq,isClosed)}</tr></thead>
       <tbody id="dashboard-table-body">${dashboardRowsHtml({isReq,isClosed,shown,now})}</tbody>
     </table></div>`;
+}
+// ---------------- HR SCOREBOARD (phase 4a: manual widgets) ----------------
+// Bob's scoreboard (Nov 3 Pow-Wow). Handler-only. Two dated values (last PAGA
+// audit, next handbook publish) and a manual policy/legal-changes list. The
+// quarterly check-in and attestation tiles are placeholders until their feeds
+// exist. Day thresholds are PURE helpers over date-only strings so they are
+// timezone-proof and unit-tested (tests/hr_scoreboard_frontend.mjs).
+const SB_PAGA_AMBER_DAYS = 330, SB_PAGA_RED_DAYS = 365, SB_POLICY_WINDOW_DAYS = 30;
+const SB_POLICY_STATUSES = ["Upcoming","Done","Withdrawn"];
+const sbDayNum = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||"")); return m ? Date.UTC(+m[1], +m[2]-1, +m[3]) / 86400000 : null; };
+const sbTodayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+// Whole days from `from` to `to` (date-only strings); null when either is missing.
+function sbDaysBetween(from, to){ const a = sbDayNum(from), b = sbDayNum(to); return (a===null||b===null) ? null : Math.round(b - a); }
+// PAGA: neutral under 330 days, amber at 330+, red "Overdue" at 365+.
+function sbPagaState(last, today){
+  const days = sbDaysBetween(last, today);
+  if (days === null) return { days:null, level:"unset", label:"Not set" };
+  if (days >= SB_PAGA_RED_DAYS) return { days, level:"red", label:"Overdue" };
+  if (days >= SB_PAGA_AMBER_DAYS) return { days, level:"amber", label:"Due soon" };
+  return { days, level:"ok", label:"On track" };
+}
+// Handbook: days until publish; red once the date has passed.
+function sbHandbookState(next, today){
+  const days = sbDaysBetween(today, next);
+  if (days === null) return { days:null, level:"unset", label:"Not set" };
+  if (days < 0) return { days, level:"red", label:"Past due" };
+  return { days, level:"ok", label: days === 0 ? "Today" : "Scheduled" };
+}
+// Upcoming (not Done/Withdrawn) with an effective date from today through +30 days.
+function sbPolicyWithin30(rows, today){
+  return (rows||[]).filter(r => { if (r.status !== "Upcoming") return false; const d = sbDaysBetween(today, r.effective_date); return d !== null && d >= 0 && d <= SB_POLICY_WINDOW_DAYS; }).length;
+}
+function sbPolicySorted(rows){
+  return [...(rows||[])].sort((a,b) => { const x = sbDayNum(a.effective_date), y = sbDayNum(b.effective_date);
+    if (x===null && y===null) return String(a.title||"").localeCompare(String(b.title||"")); if (x===null) return 1; if (y===null) return -1; return x - y || String(a.title||"").localeCompare(String(b.title||"")); });
+}
+// source_url is UNTRUSTED text: only http(s) becomes a link (target=_blank pairs with rel).
+function sbSourceLink(u){
+  const s = String(u||"").trim();
+  if (!s) return '<span class="muted">—</span>';
+  if (!/^https?:\/\/[^\s<>"]+$/i.test(s)) return `<span class="muted">${esc(s)}</span>`;
+  return `<a href="${esc(s)}" target="_blank" rel="noopener noreferrer">Source</a>`;
+}
+const sbLevelPill = (level, label) => `<span class="pill ${level==="red"?"r-High":level==="amber"?"r-Medium":level==="ok"?"due-ok":"dot"}">${esc(label)}</span>`;
+
+let sbSettings = {}, sbPolicies = [], sbEditing = null, sbPolicyEditing = null;
+const SB_SETTING_META = {
+  paga_last_audit:       { tile:"sb-tile-paga",     title:"PAGA last audit",       dateLabel:"Date of last PAGA audit" },
+  handbook_next_publish: { tile:"sb-tile-handbook", title:"Handbook next publish", dateLabel:"Next handbook publish date" },
+};
+function sbSettingTileHtml(key){
+  const meta = SB_SETTING_META[key], row = sbSettings[key] || {}, today = sbTodayStr();
+  const note = row.note ? `<div class="note-sm" style="margin-top:6px">${esc(row.note)}</div>` : "";
+  if (sbEditing === key) return `<div class="mini-l">${esc(meta.title)}</div>
+    <div style="margin-top:8px"><label for="sb-date">${esc(meta.dateLabel)}</label><input id="sb-date" type="date" value="${esc(String(row.value_date||"").slice(0,10))}"></div>
+    <div><label for="sb-note">Note</label><input id="sb-note" type="text" maxlength="2000" value="${esc(row.note||"")}"></div>
+    <div id="sb-err-${key}"></div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn sm ghost" onclick="sbCancelSetting()">Cancel</button><button class="btn sm" onclick="sbSaveSetting('${key}')">Save</button></div>`;
+  let big, sub, pill;
+  if (key === "paga_last_audit"){
+    const s = sbPagaState(row.value_date, today);
+    big = s.days === null ? "—" : (s.days < 0 ? "Future" : `${s.days}`);
+    sub = s.days === null ? "No audit date recorded" : (s.days < 0 ? "Audit date is in the future" : `days since audit (${esc(fmtDateOnly(row.value_date))})`);
+    pill = sbLevelPill(s.level, s.label);
+  } else {
+    const s = sbHandbookState(row.value_date, today);
+    big = s.days === null ? "—" : `${Math.abs(s.days)}`;
+    sub = s.days === null ? "No publish date recorded" : (s.days < 0 ? `days past due (${esc(fmtDateOnly(row.value_date))})` : s.days === 0 ? `publishes today (${esc(fmtDateOnly(row.value_date))})` : `days until publish (${esc(fmtDateOnly(row.value_date))})`);
+    pill = sbLevelPill(s.level, s.label);
+  }
+  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="mini-l">${esc(meta.title)}</div>${pill}</div>
+    <div class="n" style="font-size:34px;font-weight:700;margin:8px 0 2px">${big}</div><div class="note-sm">${sub}</div>${note}
+    <div style="margin-top:10px"><button class="btn sm ghost" onclick="sbEditSetting('${key}')">${row.value_date?"Edit":"Set date"}</button></div>`;
+}
+function sbPolicyFormHtml(r){
+  const v = k => esc(r?.[k] ?? ""), d = k => esc(String(r?.[k]||"").slice(0,10));
+  return `<div class="card" style="margin:12px 0;background:var(--bg-2)"><div class="mini-l">${r?"Edit policy / legal change":"Add policy / legal change"}</div>
+    <div><label for="sb-p-title">Title</label><input id="sb-p-title" type="text" maxlength="300" value="${v("title")}"></div>
+    <div class="grid2">
+      <div><label for="sb-p-jurisdiction">Jurisdiction</label><input id="sb-p-jurisdiction" type="text" maxlength="200" placeholder="e.g. California, NYC, Federal" value="${v("jurisdiction")}"></div>
+      <div><label for="sb-p-effective_date">Effective date</label><input id="sb-p-effective_date" type="date" value="${d("effective_date")}"></div>
+      <div><label for="sb-p-source_url">Source link</label><input id="sb-p-source_url" type="text" placeholder="https://…" value="${v("source_url")}"></div>
+      <div><label for="sb-p-status">Status</label><select id="sb-p-status">${SB_POLICY_STATUSES.map(s=>`<option ${(r?.status||"Upcoming")===s?"selected":""}>${s}</option>`).join("")}</select></div>
+    </div>
+    <div><label for="sb-p-notes">Notes</label><textarea id="sb-p-notes" rows="2" maxlength="4000">${v("notes")}</textarea></div>
+    <div id="sb-p-err"></div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn sm ghost" onclick="sbClosePolicyForm()">Cancel</button><button class="btn sm" onclick="sbSavePolicy()">${r?"Save changes":"Add change"}</button></div></div>`;
+}
+function sbPolicyTileHtml(){
+  const today = sbTodayStr(), rows = sbPolicySorted(sbPolicies), within = sbPolicyWithin30(sbPolicies, today);
+  const editRow = sbPolicyEditing && sbPolicyEditing !== "new" ? sbPolicies.find(x => x.id === sbPolicyEditing) : null;
+  const form = sbPolicyEditing ? sbPolicyFormHtml(editRow) : "";
+  const body = rows.length ? `<div style="overflow-x:auto"><table class="grid stack-cards"><thead><tr><th>Effective</th><th>Title</th><th>Jurisdiction</th><th>Source</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody>${rows.map(r => {
+      const dd = sbDaysBetween(today, r.effective_date), soon = r.status==="Upcoming" && dd!==null && dd>=0 && dd<=SB_POLICY_WINDOW_DAYS;
+      const stCls = r.status==="Done" ? "due-ok" : r.status==="Withdrawn" ? "a-Withdrawn" : (soon ? "due-over" : "dot");
+      return `<tr><td data-label="Effective">${r.effective_date?esc(fmtDateOnly(r.effective_date)):'<span class="muted">—</span>'}</td><td data-label="Title">${esc(r.title)}</td><td data-label="Jurisdiction">${r.jurisdiction?esc(r.jurisdiction):'<span class="muted">—</span>'}</td><td data-label="Source">${sbSourceLink(r.source_url)}</td><td data-label="Status"><span class="pill ${stCls}">${esc(r.status)}</span></td><td data-label="Notes">${r.notes?esc(r.notes):'<span class="muted">—</span>'}</td><td data-label=""><button class="btn sm ghost" data-id="${esc(r.id)}" onclick="sbOpenPolicyForm(this.dataset.id)">Edit</button></td></tr>`; }).join("")}</tbody></table></div>`
+    : `<p class="note-sm">No policy or legal changes recorded yet.</p>`;
+  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><div><div class="mini-l">Policy &amp; legal changes</div>
+      <div class="note-sm"><b id="sb-within-30">${within}</b> upcoming within ${SB_POLICY_WINDOW_DAYS} days. Entered by hand.</div></div>
+      ${sbPolicyEditing?"":`<button class="btn sm" onclick="sbOpenPolicyForm('new')">+ Add change</button>`}</div>${form}${body}`;
+}
+const sbPlaceholderTile = (title, msg) => `<div class="mini-l">${esc(title)}</div><div class="muted" style="margin-top:10px">${esc(msg)}</div>`;
+// Repaint ONLY one tile container. Never render(): that would wipe an open editor elsewhere.
+function sbRepaint(id, html){ const el = document.getElementById(id); if (el) el.innerHTML = html; }
+function sbRepaintSetting(key){ sbRepaint(SB_SETTING_META[key].tile, sbSettingTileHtml(key)); }
+function sbRepaintPolicy(){ sbRepaint("sb-tile-policy", sbPolicyTileHtml()); }
+function sbEditSetting(key){ const prev = sbEditing; sbEditing = key; if (prev && prev !== key) sbRepaintSetting(prev); sbRepaintSetting(key); document.getElementById("sb-date")?.focus(); }
+function sbCancelSetting(){ const k = sbEditing; sbEditing = null; if (k) sbRepaintSetting(k); }
+async function sbSaveSetting(key){
+  if (!scoreboardEnabled) return;
+  const date = ($("sb-date")?.value || "").trim(), note = ($("sb-note")?.value || "").trim();
+  const err = m => { const el = $("sb-err-"+key); if (el) el.innerHTML = `<div class="banner err">${esc(m)}</div>`; };
+  const epoch = sessionEpoch;
+  const { data, error } = await sb.rpc("hr_scoreboard_set", { p_key:key, p_date: date || null, p_note: note || null });
+  if (epoch !== sessionEpoch) return;
+  if (error){ err(errText(error)); return; }
+  sbSettings[key] = data || { key, value_date: date || null, note: note || null };
+  sbEditing = null; sbRepaintSetting(key);
+}
+function sbOpenPolicyForm(id){ sbPolicyEditing = id; sbRepaintPolicy(); document.getElementById("sb-p-title")?.focus(); }
+function sbClosePolicyForm(){ sbPolicyEditing = null; sbRepaintPolicy(); }
+async function sbSavePolicy(){
+  if (!scoreboardEnabled) return;
+  const F = ["title","jurisdiction","effective_date","source_url","status","notes"], p = {};
+  for (const f of F) p[f] = ($("sb-p-"+f)?.value ?? "").trim();
+  const err = m => { const el = $("sb-p-err"); if (el) el.innerHTML = `<div class="banner err">${esc(m)}</div>`; };
+  if (!p.title){ err("Title is required."); return; }
+  if (p.source_url && !/^https?:\/\/[^\s<>"]+$/i.test(p.source_url)){ err("Source link must start with http:// or https://."); return; }
+  const id = sbPolicyEditing === "new" ? null : sbPolicyEditing, epoch = sessionEpoch;
+  const { data, error } = await sb.rpc("hr_policy_change_save", { p_id:id, p });
+  if (epoch !== sessionEpoch) return;
+  if (error){ err(errText(error)); return; }
+  if (data?.id){ const i = sbPolicies.findIndex(x => x.id === data.id); if (i >= 0) sbPolicies[i] = data; else sbPolicies.push(data); }
+  sbPolicyEditing = null; sbRepaintPolicy();
+}
+async function renderScoreboardInto(el){
+  const epoch = sessionEpoch, dv = dashView;
+  const [s, p] = await Promise.all([
+    sb.from("hr_scoreboard_settings").select("key,value_date,note,updated_at"),
+    sb.from("hr_policy_changes").select("id,title,jurisdiction,effective_date,source_url,notes,status,updated_at").order("effective_date",{ascending:true}),
+  ]);
+  if (epoch !== sessionEpoch || dashView !== dv || !el.isConnected) return;   // view/session changed while loading
+  const failed = s.error || p.error;
+  if (failed){ el.innerHTML = `<div class="card"><div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap"><h2 class="section" style="margin:0">HR dashboard</h2>${dashToggleHtml("scoreboard")}</div><div class="banner err" style="margin-top:14px">Could not load the scoreboard: ${esc(errText(failed))}</div></div>`; return; }
+  sbSettings = Object.fromEntries((s.data||[]).map(r => [r.key, r])); sbPolicies = p.data || [];
+  sbEditing = null; sbPolicyEditing = null;
+  el.innerHTML = `<div class="card"><div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap"><h2 class="section" style="margin:0">HR dashboard</h2>${dashToggleHtml("scoreboard")}</div>
+      <p class="note-sm" style="margin:10px 0 0">Scoreboard for People &amp; Culture leadership. Reminders are visual only; nothing is emailed.</p></div>
+    <div class="grid2" style="margin-top:14px">
+      <div class="card" id="sb-tile-paga">${sbSettingTileHtml("paga_last_audit")}</div>
+      <div class="card" id="sb-tile-handbook">${sbSettingTileHtml("handbook_next_publish")}</div>
+      <div class="card" id="sb-tile-checkins">${sbPlaceholderTile("Quarterly check-ins","Not connected yet — coming once the UKG check-in feed is set up")}</div>
+      <div class="card" id="sb-tile-attest">${sbPlaceholderTile("Attestation flags","Not connected yet")}</div>
+    </div>
+    <div class="card" id="sb-tile-policy" style="margin-top:14px">${sbPolicyTileHtml()}</div>`;
+}
+// One toggle row for every dashboard tab (was copied into three renderers).
+function dashToggleHtml(active){
+  return `<div class="dash-toggle">${DASH_TABS.map(([k,l]) => `<button${k===active?' class="on"':''} aria-pressed="${k===active}" onclick="setDashView('${k}')">${esc(l)}</button>`).join("")}</div>`;
 }
 // ---------------- WORKERS' COMP TRACKER (source spec, 8/21) -----------------
 // Derived values are computed here from source dates so they can't go stale:
@@ -1911,13 +2081,7 @@ async function renderWcInto(el){
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
-        <div class="dash-toggle">
-          <button aria-pressed="false" onclick="setDashView('cases')">Cases</button>
-          <button aria-pressed="false" onclick="setDashView('requests')">Requests</button>
-          <button aria-pressed="false" onclick="setDashView('closed')">Closed</button>
-          <button class="on" aria-pressed="true" onclick="setDashView('wc')">Workers' Comp</button>
-          <button aria-pressed="false" onclick="setDashView('legal')">Legal &amp; Claims</button>
-        </div>
+        ${dashToggleHtml('wc')}
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
         <button type="button" class="stat stat-button ${wcFilters.quick==='open'?'active':''}" data-wc-quick-filter="open" aria-pressed="${wcFilters.quick==='open'}" onclick="setWcQuickFilter('open')"><div class="n">${openN}</div><div class="l">Open claims</div><div class="stat-hint">Filter table</div></button>
@@ -2193,7 +2357,7 @@ const LG_SORT_VALS = {
   ebpoint: r => r.eb_point || "",
   due: r => Date.parse(r.due_date || "") || 0,
 };
-const LG_COLUMNS = [["ref","Case ID"],["risk","Risk"],["status","Status"],["complainant","Complainant"],["type","Type"],["opposing","Opposing counsel / agency"],["company","Company counsel"],["ebpoint","EB point"],["due","Due date"],["","Docs"]];
+const LG_COLUMNS = [["ref","Case ID"],["risk","Risk"],["status","Status"],["complainant","Complainant"],["type","Category"],["opposing","Opposing counsel / agency"],["company","Company counsel"],["ebpoint","EB point"],["due","Due date"],["","Docs"]];
 function setLegalSort(key){
   if (!LG_SORT_VALS[key]) return;
   if (lgSort.key === key) lgSort.dir = -lgSort.dir;
@@ -2213,7 +2377,7 @@ function legalModel(){
       (lgFilters.quick === "litigation" && r.case_state === "Active" && r.status === "Litigation") ||
       (lgFilters.quick === "due" && lgDue(r))) &&
     (!q || [r.ref, r.complainant, r.opposing_counsel, r.company_counsel, r.eb_point,
-      r.synopsis, r.pending_action, r.epli_notes, r.notes, r.violation_description].some(v => (v||"").toLowerCase().includes(q))));
+      r.synopsis, r.pending_action, r.epli_notes, r.notes, r.violation_description, r.claim_type, r.legal_type].some(v => (v||"").toLowerCase().includes(q))));
   if (lgSort.key && LG_SORT_VALS[lgSort.key]) shown.sort(trackerCompare(lgSort, LG_SORT_VALS));
   return { rows:legalData, shown };
 }
@@ -2221,7 +2385,7 @@ function legalRowsHtml({shown}){
   return shown.length ? shown.map(r=>`<tr class="clk ${lgDue(r)?'overdue':''}" onclick="lgOpen('${esc(r.id)}')">
     <td style="padding-left:20px"><button type="button" class="row-link ref" aria-label="Open legal case ${esc(r.ref)}" onclick="event.stopPropagation();lgOpen('${esc(r.id)}')">${esc(r.ref)}</button>${r.case_state==='Completed'?' <span class="chip">Completed</span>':''}</td>
     <td>${riskPill(r.risk_level)}</td><td>${lgStatusPill(r.status)}</td><td>${esc(r.complainant||'—')}</td>
-    <td>${esc(r.claim_type||'—')}</td><td>${esc(r.opposing_counsel||'—')}</td><td>${esc(r.company_counsel||'—')}</td><td>${esc(r.eb_point||'—')}</td>
+    <td>${esc(r.claim_type||'—')}${r.legal_type?`<div class="muted" style="font-size:11px" title="Type: ${esc(r.legal_type)}">Type: ${esc(r.legal_type)}</div>`:''}</td><td>${esc(r.opposing_counsel||'—')}</td><td>${esc(r.company_counsel||'—')}</td><td>${esc(r.eb_point||'—')}</td>
     <td>${r.due_date ? (lgDue(r)?`<span class="pill due-over">${fmtDateOnly(r.due_date)}</span>`:fmtDateOnly(r.due_date)) : (r.due_date_note?`<span class="muted">${esc(r.due_date_note)}</span>`:'—')}</td>
     <td onclick="event.stopPropagation()">${lgDocsCell(r.docs_link)}</td>
   </tr>`).join("") : `<tr><td colspan="10" class="empty-row">No legal cases match these filters.</td></tr>`;
@@ -2234,7 +2398,7 @@ function legalFilterChipsHtml(){
   if (lgFilters.state) entries.push({key:"state",label:`Case state: ${lgFilters.state}`});
   if (lgFilters.risk) entries.push({key:"risk",label:`Risk: ${lgFilters.risk}`});
   if (lgFilters.status) entries.push({key:"status",label:`Status: ${lgFilters.status}`});
-  if (lgFilters.type) entries.push({key:"type",label:`Type: ${lgFilters.type}`});
+  if (lgFilters.type) entries.push({key:"type",label:`Category: ${lgFilters.type}`});
   return trackerChipsHtml(entries,"clearLegalFilter");
 }
 function syncLegalFilterInputs(){
@@ -2327,6 +2491,9 @@ async function renderLegalInto(el){
                linksResult.error ? "Linked cases are unavailable until the T137 legal migration is deployed." : "",
                relatedResult.error ? "Universal case links are not available until the latest migration is deployed." : ""].filter(Boolean),
     };
+    const invoicesOk = await lgLoadInvoices(sel.id, stillCurrent);
+    if (!stillCurrent()) return;
+    if (!invoicesOk) legalDetail.errors.push("Legal invoice tracking is unavailable until the legal invoices migration is deployed.");
   } else {
     legalDetail = { notes:[], files:[], links:[], relatedLinks:[], linkedCases:{}, linkedFiles:{}, errors:[] };
   }
@@ -2350,13 +2517,7 @@ async function renderLegalInto(el){
   el.innerHTML = `<div class="card">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <h2 class="section" style="margin:0">HR dashboard</h2>
-        <div class="dash-toggle">
-          <button aria-pressed="false" onclick="setDashView('cases')">Cases</button>
-          <button aria-pressed="false" onclick="setDashView('requests')">Requests</button>
-          <button aria-pressed="false" onclick="setDashView('closed')">Closed</button>
-          <button aria-pressed="false" onclick="setDashView('wc')">Workers' Comp</button>
-          <button class="on" aria-pressed="true" onclick="setDashView('legal')">Legal &amp; Claims</button>
-        </div>
+        ${dashToggleHtml('legal')}
       </div>
       <div class="row dashboard-stats" style="margin:18px 0 4px">
         <button type="button" class="stat stat-button ${lgFilters.quick==='active'?'active':''}" data-legal-quick-filter="active" aria-pressed="${lgFilters.quick==='active'}" onclick="setLegalQuickFilter('active')"><div class="n">${activeN}</div><div class="l">Active cases</div><div class="stat-hint">Filter table</div></button>
@@ -2371,7 +2532,7 @@ async function renderLegalInto(el){
         <label class="filter-field"><span>Case state</span><select id="lg-f-state" onchange="lgApplyFilters()"><option value="">All states</option>${LEGAL_STATES.map(s=>`<option ${lgFilters.state===s?'selected':''}>${s}</option>`).join("")}</select></label>
         <label class="filter-field"><span>Risk</span><select id="lg-f-risk" onchange="lgApplyFilters()"><option value="">All risks</option>${RISKS.map(r=>`<option ${lgFilters.risk===r?'selected':''}>${r}</option>`).join("")}</select></label>
         <label class="filter-field"><span>Status</span><select id="lg-f-status" onchange="lgApplyFilters()"><option value="">All statuses</option>${statusOpts.map(s=>`<option ${lgFilters.status===s?'selected':''}>${esc(s)}</option>`).join("")}</select></label>
-        <label class="filter-field"><span>Type</span><select id="lg-f-type" onchange="lgApplyFilters()"><option value="">All types</option>${typeOpts.map(t=>`<option ${lgFilters.type===t?'selected':''}>${esc(t)}</option>`).join("")}</select></label>
+        <label class="filter-field"><span>Category</span><select id="lg-f-type" onchange="lgApplyFilters()"><option value="">All categories</option>${typeOpts.map(t=>`<option ${lgFilters.type===t?'selected':''}>${esc(t)}</option>`).join("")}</select></label>
       </div>
       <div id="legal-active-filters" class="active-filter-list" aria-live="polite">${legalFilterChipsHtml()}</div>
     </div>
@@ -2478,7 +2639,7 @@ function lgSummary(r){
   const docs = legalDetail.files.length ? legalDetail.files.map(f=>{
     const display = legalDocumentName(f.name);
     const kind = legalDocumentKind(display);
-    return `<div class="task"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(display)}</b><span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
+    return `<div class="task"><span style="min-width:0;overflow-wrap:anywhere"><b>${esc(display)}</b>${lgInvoiceChip(r.id,f.name)}<span class="muted" style="font-size:11px"> · ${fmtBytes(f.metadata?.size)}${f.created_at?` · ${fmt(f.created_at)}`:""}</span></span>
       <span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
         ${kind!=="download"?`<button class="btn sm sec" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgPreviewDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Preview</button>`:""}
         <button class="btn sm ghost" data-p="${esc(f.name)}" data-n="${esc(display)}" onclick="lgDownloadDocument('${esc(r.id)}',this.dataset.p,this.dataset.n)">Download</button>
@@ -2492,7 +2653,8 @@ function lgSummary(r){
       <div class="row">
         <div class="col">
           <div class="kv"><span class="k">Complainant</span><b>${esc(r.complainant||'—')}</b></div>
-          <div class="kv"><span class="k">Type</span><span>${esc(r.claim_type||'—')}</span></div>
+          <div class="kv"><span class="k">Category</span><span>${esc(r.claim_type||'—')}</span></div>
+          <div class="kv"><span class="k">Type</span><span>${esc(r.legal_type||'—')}</span></div>
           <div class="kv"><span class="k">Case state</span><span>${esc(r.case_state||'—')}</span></div>
           <div class="kv"><span class="k">Due date</span><span class="${lgDue(r)?'pill due-over':''}">${r.due_date?esc(fmtDateOnly(r.due_date)):'—'}</span></div>
           <div class="kv"><span class="k">Due date note</span><span>${esc(r.due_date_note||'—')}</span></div>
@@ -2501,7 +2663,8 @@ function lgSummary(r){
           <div class="kv"><span class="k">Opposing side</span><span>${esc(r.opposing_counsel||'—')}</span></div>
           <div class="kv"><span class="k">Company counsel</span><span>${esc(r.company_counsel||'—')}</span></div>
           <div class="kv"><span class="k">EB point</span><span>${esc(r.eb_point||'—')}</span></div>
-          <div class="kv"><span class="k">EPLI tendered</span><span>${esc(r.epli_tendered||'—')}</span></div>
+          <div class="kv"><span class="k">EPLI tendered</span><span>${esc(r.epli_tendered||'—')}${r.epli_tendered==='Yes'&&r.epli_tendered_date?` <span class="muted" style="font-size:11px">on ${esc(fmtDateOnly(r.epli_tendered_date))}</span>`:''}</span></div>
+          <div class="kv"><span class="k">EPLI accepted / covered</span><span>${esc(r.epli_accepted||'—')}${r.epli_accepted==='Yes'&&r.epli_notice_date?` <span class="muted" style="font-size:11px">notice ${esc(fmtDateOnly(r.epli_notice_date))}</span>`:''}</span></div>
           <div class="kv"><span class="k">Settlement amount</span><span>${fmtMoney(r.settlement_amount)?`<b>${esc(fmtMoney(r.settlement_amount))}</b> <span class="muted" style="font-size:11px">agreed</span>`:'—'}</span></div>
           <div class="kv"><span class="k">Penalty amount</span><span>${fmtMoney(r.penalty_amount)?`<b>${esc(fmtMoney(r.penalty_amount))}</b> <span class="muted" style="font-size:11px">court-ordered</span>`:'—'}</span></div>
         </div>
@@ -2531,6 +2694,7 @@ function lgSummary(r){
         <div id="lg-doc-status" aria-live="polite">${legalComposer.status?`<div class="banner ok">${esc(legalComposer.status)}</div>`:""}${legalComposer.error?`<div class="banner err">${esc(legalComposer.error)}</div>`:""}</div>
       </div>
     </div>
+    ${lgInvoicesCard(r)}
     ${lgLinkedCasesCard(r)}
     ${legalPreview.open?lgPreviewModal():""}`;
 }
@@ -2816,6 +2980,54 @@ async function lgLinkedMessagePreview(caseId,attachmentId,name,type,restoreId){
     authorize:()=>authorizeMessageAttachment(caseId,"",attachmentId,""),
     download:()=>lgLinkedMessageDownload(caseId,attachmentId,name)});
 }
+// Distinct previously-saved free-text types, offered as <datalist> suggestions —
+// this is how "auto-saves entries as options" works without an options table.
+function legalTypeOptions(){
+  // Case-insensitive, trimmed dedupe: "wage & hour" and "Wage & Hour " are one suggestion
+  // (the first spelling seen wins).
+  const seen = new Map();
+  for (const x of (legalData||[])){
+    const t = (x.legal_type||"").trim();
+    if (t && !seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+  }
+  return [...seen.values()].sort((a,b)=>a.localeCompare(b));
+}
+// Show/hide the EPLI date fields in place (hidden by default, shown on "Yes").
+// Deliberately NOT render(): a repaint mid-form would discard typed values.
+// The date input is visible for "Yes" and for any legacy off-list value (so its date is
+// never hidden or silently dropped); hidden for exactly "No"/"TBD"; for a blank answer it
+// shows only if a date is already present.
+function lgEpliDateVisible(answer, date){
+  if (answer === "No" || answer === "TBD") return false;
+  return answer !== "" || !!date;
+}
+function lgEpliToggle(){
+  for (const [sel,wrap,dateId] of [["lg-epli_tendered","lg-epli_tendered_date-wrap","lg-epli_tendered_date"],["lg-epli_accepted","lg-epli_notice_date-wrap","lg-epli_notice_date"]]){
+    const w=$(wrap); if (w && $(sel)) w.hidden = !lgEpliDateVisible($(sel).value, $(dateId)?.value || "");
+  }
+}
+// Soft, never-blocking sanity warnings for the EPLI fields (p = trimmed save payload,
+// today = local YYYY-MM-DD). Date strings are ISO so lexical order is chronological.
+function lgEpliWarnings(p, today){
+  const w = [];
+  if (p.epli_accepted === "Yes" && p.epli_tendered === "No") w.push("Accepted by EPLI is Yes but Tendered to EPLI is No.");
+  if (p.epli_tendered === "Yes" && !p.epli_tendered_date) w.push("Tendered to EPLI is Yes but no tendered date is entered.");
+  if (p.epli_tendered_date && p.epli_notice_date && p.epli_notice_date < p.epli_tendered_date) w.push("The date of notice is before the tendered date.");
+  if ((p.epli_tendered_date && p.epli_tendered_date > today) || (p.epli_notice_date && p.epli_notice_date > today)) w.push("An EPLI date is in the future.");
+  return w;
+}
+// Non-blocking notice that outlives the post-save render() (it lives on <body>, outside
+// the app root). Never called mid-form and never triggers a repaint.
+function lgSoftWarn(messages){
+  if (!messages.length || typeof document === "undefined") return;
+  document.getElementById("lg-save-warn")?.remove();
+  const el = document.createElement("div");
+  el.id = "lg-save-warn"; el.className = "banner warn"; el.setAttribute("role","status");
+  el.style.cssText = "position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:9999;max-width:min(560px,92vw);box-shadow:0 4px 18px rgba(0,0,0,.25)";
+  el.innerHTML = `<b>Saved, but please double-check:</b><ul style="margin:6px 0 0 18px;padding:0">${messages.map(m=>`<li>${esc(m)}</li>`).join("")}</ul><button type="button" class="btn sm sec" style="margin-top:8px" onclick="this.parentNode.remove()">Dismiss</button>`;
+  document.body.appendChild(el);
+  setTimeout(()=>{ if (el.isConnected) el.remove(); }, 15000);
+}
 function lgEditor(r){
   const v = k => esc(r ? (r[k] ?? "") : "");
   const d = k => esc(r && r[k] ? String(r[k]).slice(0,10) : "");
@@ -2839,7 +3051,8 @@ function lgEditor(r){
       <div><label>Case state</label><select id="lg-case_state">${opt(LEGAL_STATES, r?r.case_state:"Active", false)}</select></div>
       <div><label>Risk level</label><select id="lg-risk_level">${opt(RISKS, r?r.risk_level:"")}</select></div>
       <div><label>Status</label><select id="lg-status">${opt(LEGAL_STATUSES, r?r.status:"")}</select></div>
-      <div><label>Type</label><select id="lg-claim_type">${opt(LEGAL_TYPES, r?r.claim_type:"")}</select></div>
+      <div><label>Category</label><select id="lg-claim_type">${opt(LEGAL_TYPES, r?r.claim_type:"")}</select></div>
+      <div><label>Type</label><input id="lg-legal_type" type="text" maxlength="120" list="lg-legal_type-opts" autocomplete="off" value="${v('legal_type')}"><datalist id="lg-legal_type-opts">${legalTypeOptions().map(t=>`<option value="${esc(t)}"></option>`).join("")}</datalist><div class="note-sm muted">Free text, up to 120 characters, e.g. Wage &amp; Hour, ACA, Fair Workweek, agency name. Saved values are suggested next time.</div></div>
     </div>
     <div class="mini-l" style="margin-top:12px">Parties</div>
     <div class="grid2">
@@ -2856,7 +3069,10 @@ function lgEditor(r){
     <div><label>Synopsis</label><textarea id="lg-synopsis" rows="4">${v('synopsis')}</textarea></div>
     <div class="mini-l" style="margin-top:12px">EPLI</div>
     <div class="grid2">
-      <div><label>Tendered to EPLI?</label><select id="lg-epli_tendered">${opt(LEGAL_EPLI, r?r.epli_tendered:"")}</select></div>
+      <div><label>Tendered to EPLI?</label><select id="lg-epli_tendered" onchange="lgEpliToggle()">${opt(LEGAL_EPLI, r?r.epli_tendered:"")}</select></div>
+      <div id="lg-epli_tendered_date-wrap" ${lgEpliDateVisible(r?(r.epli_tendered||''):'', r&&r.epli_tendered_date)?'':'hidden'}><label>Date tendered</label><input id="lg-epli_tendered_date" type="date" value="${d('epli_tendered_date')}"></div>
+      <div><label>Accepted / covered by EPLI?</label><select id="lg-epli_accepted" onchange="lgEpliToggle()">${opt(LEGAL_EPLI, r?r.epli_accepted:"")}</select></div>
+      <div id="lg-epli_notice_date-wrap" ${lgEpliDateVisible(r?(r.epli_accepted||''):'', r&&r.epli_notice_date)?'':'hidden'}><label>Date of notice</label><input id="lg-epli_notice_date" type="date" value="${d('epli_notice_date')}"></div>
     </div>
     <div><label>EPLI coverage notes</label><textarea id="lg-epli_notes" rows="2">${v('epli_notes')}</textarea></div>
     <div class="mini-l" style="margin-top:12px">Outcome &amp; financials</div>
@@ -2885,11 +3101,17 @@ function lgCancelEdit(){ if(lgSelected==="new") lgClose(); else { lgEditing=fals
 async function lgSave(){
   const F = ["case_state","risk_level","status","complainant","claim_type",
     "opposing_counsel","company_counsel","eb_point","synopsis",
-    "epli_tendered","epli_notes","pending_action",
+    "epli_tendered","epli_notes","pending_action","legal_type",
+    "epli_tendered_date","epli_accepted","epli_notice_date",
     "due_date","due_date_note","docs_link",
     "settlement_amount","penalty_amount","violation_description"];
   const p = {};
   for (const f of F) p[f] = ($("lg-"+f)?.value ?? "").trim();
+  p.legal_type = p.legal_type.slice(0,120);
+  // Clear a stale date only when the answer is exactly "No" or "TBD". A legacy off-list
+  // value (or a blank answer) keeps its date.
+  if (p.epli_tendered === "No" || p.epli_tendered === "TBD") p.epli_tendered_date = "";
+  if (p.epli_accepted === "No" || p.epli_accepted === "TBD") p.epli_notice_date = "";
   const err = m => { const el=$("lg-err"); el.innerHTML = `<div class="banner err">${esc(m)}</div>`; el.scrollIntoView({behavior:"smooth",block:"center"}); };
   // The workbook has rows identified only by their synopsis (e.g. "Privacy"),
   // so either field is enough — but a fully unlabeled row helps no one.
@@ -2907,7 +3129,9 @@ async function lgSave(){
   const { error } = await sb.rpc("legal_save", { p_id: lgSelected === "new" ? null : lgSelected, p });
   if (error){ err(errText(error)); return; }
   if (lgSelected === "new") lgSelected = null;
+  const warnings = lgEpliWarnings(p, new Date(Date.now() - new Date().getTimezoneOffset()*60000).toISOString().slice(0,10));
   lgEditing = false; render(); syncRoute();
+  lgSoftWarn(warnings);
 }
 function legalStoragePath(caseId, storedName){
   const id = String(caseId||"");
@@ -3023,6 +3247,324 @@ async function lgPreviewDocument(caseId, storedName, displayName){
   legalPreview = {open:true,caseId,storedName,name:displayName||legalDocumentName(storedName),url:data.signedUrl,kind};
   render();
 }
+// ---- legal invoices (Bob, Nov 3: running total against the retention) -------
+// The handler confirms a locally extracted total or types the amount. The
+// running total comes from the legal_spend_summary_v2 RPC. lgInvoicesCard renders from
+// lgSummary() ONLY (never lgEditor), draft fields live in legalInvoices and are
+// bound with silent oninput handlers, and every action repaints only
+// #lg-invoices-card -- never a full-page re-render mid-form (data-loss trap).
+const LG_INV_MAX_BYTES = 25*1024*1024;
+function blankLegalInvoices(caseId=null){
+  return { caseId, available:true, rows:[], spend:null, draft:{amount:"",firm:"",number:"",date:"",counts:true},
+    file:null, suggestion:null, suggestionNote:"", pdfRead:null, pending:null, busy:false, status:"", err:"", row:null, retention:null };
+}
+// "$12,500.50" -> "12500.50"; anything else (letters, negatives, >2 decimals) -> null.
+// Invoice-amount check on top of lgParseMoney: "12,50" (comma-decimal) is
+// rejected rather than silently read as 1250; $0 is rejected; > $1,000,000 asks to confirm.
+function lgCheckInvoiceAmount(v){
+  const raw = String(v==null?"":v).trim();
+  if (/,\d{1,2}$/.test(raw)) return { err:"That looks like a comma used as a decimal point (12,50). Type the amount with a period, e.g. 12.50 or 12,500.50." };
+  const amount = lgParseMoney(raw);
+  if (amount===null) return { err:"Enter the invoice total as a number, e.g. 12500.50 ($ signs and commas are OK)." };
+  if (Number(amount)===0) return { err:"The invoice total cannot be $0." };
+  if (Number(amount)>1000000 && !confirm(`${fmtMoney(Number(amount))} is over $1,000,000. Is that amount correct?`)) return { err:"Amount not confirmed. Check the invoice total and try again." };
+  return { amount };
+}
+function lgParseMoney(v){
+  const match = /^\$?\s*((?:\d{1,12}|\d{1,3}(?:,\d{3}){1,3})(?:\.\d{1,2})?)$/.exec(String(v ?? "").trim());
+  return match ? match[1].replaceAll(",", "") : null;
+}
+async function lgInvoiceRows(caseId, isCurrent){
+  const rows = [], pageSize = 250;
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await sb.from("legal_invoices").select("*").eq("legal_case_id",caseId)
+      .order("created_at",{ascending:true}).order("id",{ascending:true}).range(offset,offset+pageSize-1);
+    if (page.error || !isCurrent()) return page;
+    rows.push(...page.data);
+    if (page.data.length < pageSize) return {data:rows,error:null};
+  }
+}
+async function lgLoadInvoices(caseId, isCurrent=()=>true){
+  const [rowsRes, spendRes] = await Promise.all([
+    lgInvoiceRows(caseId, isCurrent),
+    sb.rpc("legal_spend_summary_v2",{p_legal_case_id:caseId}),
+  ]);
+  if (!isCurrent()) return false;
+  const keep = legalInvoices.caseId===caseId ? legalInvoices : blankLegalInvoices(caseId);
+  const failed = !!(rowsRes.error || spendRes.error);
+  const spend = Array.isArray(spendRes.data) ? spendRes.data[0] : spendRes.data;
+  legalInvoices = { ...keep, caseId, available:!failed, rows:rowsRes.data||[], spend:spend||null };
+  return !failed;
+}
+function lgInvoiceChip(caseId, storedName){
+  if (legalInvoices.caseId!==caseId) return "";
+  return legalInvoices.rows.some(i=>String(i.storage_path||"").split("/").pop()===storedName)
+    ? ' <span class="chip">Invoice</span>' : "";
+}
+function lgInvoicesRepaint(caseId){
+  if (view!=="dashboard" || dashView!=="legal" || lgSelected!==caseId || lgEditing) return;
+  const el = $("lg-invoices-card"), r = legalData.find(x=>x.id===caseId);
+  if (el && r) el.outerHTML = lgInvoicesCard(r);
+}
+function lgInvoiceSummaryHtml(s){
+  if (!s) return '<span class="muted">Running total unavailable.</span>';
+  const total = Number(s.invoiced_total)||0, ret = Number(s.retention_amount)||0;
+  const pct = s.pct==null ? null : Number(s.pct);
+  const over = Number(s.over_by)||0;
+  const tone = (pct!==null && pct>=100) || (pct===null && total>0) ? "over" : pct!==null && pct>=80 ? "near" : "";
+  const width = pct===null ? (total>0?100:0) : Math.max(0,Math.min(100,pct));
+  const label = `${fmtMoney(total)} of ${fmtMoney(ret)} retention${pct!==null?` (${pct>999?">999%":Math.round(pct)+"%"})`:""}`;
+  const count = Number(s.invoice_count)||0;
+  return `<div class="lg-inv-total"><b>Case invoice total ${esc(fmtMoney(s.case_invoice_total))}</b></div>
+    <div class="lg-inv-bar ${tone}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(width)}" aria-label="${esc(label)}"><span style="width:${width}%"></span></div>
+    <div class="lg-inv-total"><b>${esc(label)}</b> <span class="muted" style="font-size:12px">${over>0?`over retention by ${esc(fmtMoney(over))}`:`${esc(fmtMoney(s.remaining))} remaining`} · ${count} counted invoice${count===1?"":"s"}</span></div>`;
+}
+function lgInvoiceRowHtml(r, i){
+  const S = legalInvoices;
+  const stored = String(i.storage_path||"").split("/").pop();
+  const display = i.file_name || legalDocumentName(stored);
+  const kind = legalDocumentKind(display);
+  const voided = !!i.voided_at;
+  const flags = (voided?`<span class="chip" title="${esc(i.void_reason||"")}">Voided</span> `:"")
+    + (!voided && i.counts_toward_retention===false ? '<span class="chip">Not counted</span> ' : "");
+  const btn = `data-c="${esc(r.id)}" data-p="${esc(stored)}" data-n="${esc(display)}"`;
+  const rid = `data-id="${esc(i.id)}"`;
+  const acts = voided ? `<span class="muted" style="font-size:11px">${esc(i.void_reason||"")}</span>` : `
+    ${kind!=="download"?`<button class="btn sm sec" ${btn} onclick="lgPreviewDocument(this.dataset.c,this.dataset.p,this.dataset.n)">Preview</button>`:""}
+    <button class="btn sm ghost" ${btn} onclick="lgDownloadDocument(this.dataset.c,this.dataset.p,this.dataset.n)">Download</button>
+    <button class="btn sm ghost" ${rid} onclick="lgInvoiceRowStart(this.dataset.id,'edit')">Edit amount</button>
+    <button class="btn sm ghost" ${rid} onclick="lgInvoiceToggleCounts(this.dataset.id)">${i.counts_toward_retention===false?"Count":"Exclude"}</button>
+    <button class="btn sm ghost" ${rid} onclick="lgInvoiceRowStart(this.dataset.id,'void')">Void</button>`;
+  const editing = S.row && S.row.id===i.id
+    ? `<tr><td colspan="5"><div class="legal-upload">${S.row.mode==="edit"
+        ? `<input type="text" inputmode="decimal" id="lg-inv-row-amount" aria-label="Corrected invoice amount" value="${esc(S.row.amount)}" oninput="lgInvoiceField('rowAmount',this.value)">`
+        : `<input type="text" id="lg-inv-row-reason" aria-label="Reason for voiding" maxlength="500" placeholder="Reason for voiding (required)" value="${esc(S.row.reason)}" oninput="lgInvoiceField('rowReason',this.value)">`}
+        <button class="btn sm sec" onclick="lgInvoiceRowSave()" ${S.busy?"disabled":""}>${S.row.mode==="edit"?"Save amount":"Void invoice"}</button>
+        <button class="btn sm ghost" onclick="lgInvoiceRowCancel()">Cancel</button></div></td></tr>` : "";
+  return `<tr class="${voided?"lg-inv-voided":""}"><td data-label="Date">${i.invoice_date?esc(fmtDateOnly(i.invoice_date)):"—"}</td>
+    <td data-label="Firm" style="overflow-wrap:anywhere">${esc(i.firm||"—")}<div class="muted" style="font-size:11px">${esc(display)}</div></td>
+    <td data-label="Invoice #">${esc(i.invoice_number||"—")}</td><td data-label="Amount" class="amt" style="text-align:right;white-space:nowrap"><b>${esc(fmtMoney(i.amount))}</b> ${flags}</td>
+    <td data-label=""><span style="display:flex;gap:6px;flex-wrap:wrap">${acts}</span></td></tr>${editing}`;
+}
+function lgInvoicesCard(r){
+  const S = legalInvoices;
+  if (!r || S.caseId!==r.id || !S.available) return '<div id="lg-invoices-card"></div>';
+  const d = S.draft;
+  const retention = S.retention!==null
+    ? `<div class="legal-upload"><input type="text" inputmode="decimal" id="lg-inv-retention" aria-label="Retention amount" value="${esc(S.retention)}" oninput="lgInvoiceField('retention',this.value)">
+        <button class="btn sm sec" data-id="${esc(r.id)}" onclick="lgRetentionSave(this.dataset.id)" ${S.busy?"disabled":""}>Save retention</button><button class="btn sm ghost" onclick="lgRetentionCancel()">Cancel</button></div>`
+    : `<button class="btn sm ghost" onclick="lgRetentionStart()">Edit retention</button>`;
+  const rows = S.rows.length ? `<div style="overflow-x:auto"><table class="stack-cards"><thead><tr><th>Date</th><th>Firm</th><th>Invoice #</th><th style="text-align:right">Amount</th><th></th></tr></thead><tbody>${S.rows.map(i=>lgInvoiceRowHtml(r,i)).join("")}</tbody></table></div>`
+    : '<span class="muted">No invoices recorded yet.</span>';
+  const label = S.busy ? "Saving…" : S.pending ? "Retry recording" : "Add invoice";
+  return `<div id="lg-invoices-card" class="card legal-invoices">
+    <div class="legal-section-head"><b>Legal invoices</b><span class="chip">defense spend vs retention</span></div>
+    <div style="margin-top:12px">${lgInvoiceSummaryHtml(S.spend)}</div>
+    <div style="margin-top:8px">${retention}</div>
+    <div style="margin-top:12px">${rows}</div>
+    <div class="divider"></div>
+    <div class="mini-l">Add invoice</div>
+    <div class="legal-upload"><input id="lg-inv-file" type="file" accept="application/pdf,.pdf" aria-describedby="lg-inv-staged" ${S.busy||S.pending?"disabled":""} onchange="lgInvoiceSetFile(this)"></div>
+    <div class="note-sm" id="lg-inv-staged">${S.pending?`Stored: ${esc(S.pending.fileName)}`:S.file?`Selected: ${esc(S.file.name)}`:""}</div>
+    <div class="note-sm" id="lg-inv-suggestion" aria-live="polite">${lgInvoiceSuggestionHtml(S)}</div>
+    <div class="legal-upload">
+      <input type="text" inputmode="decimal" id="lg-inv-amount" aria-label="Invoice total (required)" placeholder="Invoice total, e.g. 12,500.50" value="${esc(d.amount)}" oninput="lgInvoiceField('amount',this.value)">
+      <input type="text" id="lg-inv-firm" aria-label="Law firm" maxlength="200" placeholder="Firm (optional)" value="${esc(d.firm)}" oninput="lgInvoiceField('firm',this.value)">
+      <input type="text" id="lg-inv-number" aria-label="Invoice number" maxlength="100" placeholder="Invoice # (optional)" value="${esc(d.number)}" oninput="lgInvoiceField('number',this.value)">
+      <input type="date" id="lg-inv-date" aria-label="Invoice date" value="${esc(d.date)}" oninput="lgInvoiceField('date',this.value)">
+    </div>
+    <label class="note-sm" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" id="lg-inv-counts" ${d.counts?"checked":""} onchange="lgInvoiceField('counts',this.checked)"> Counts toward the retention</label>
+    <div class="legal-upload"><button id="lg-inv-add" class="btn sm sec" aria-busy="${S.busy}" ${S.busy?"disabled":""} data-id="${esc(r.id)}" onclick="lgInvoiceAdd(this.dataset.id)">${label}</button></div>
+    <div id="lg-inv-status" aria-live="polite">${S.pending?`<div class="banner warn">File stored, invoice not recorded. Press “Retry recording”; the file will not be uploaded again.</div>`:""}${S.err?`<div class="banner err">${esc(S.err)}</div>`:""}${S.status?`<div class="banner ok">${esc(S.status)}</div>`:""}</div>
+    <p class="note-sm">Confirm the invoice total before adding it. Maximum PDF size 25 MB.</p>
+  </div>`;
+}
+function lgInvoiceField(key, value){
+  const S = legalInvoices;
+  if (key==="retention") S.retention = String(value);
+  else if (key==="rowAmount" && S.row) S.row.amount = String(value);
+  else if (key==="rowReason" && S.row) S.row.reason = String(value);
+  else if (key in S.draft) S.draft[key] = key==="counts" ? !!value : String(value);
+}
+// PDF.js 6.5.438 is shipped with the portal. Only the selected file's bytes
+// enter the local parser. No document URL, external service or model is used.
+async function lgReadInvoiceAmount(file, signal){
+  const { getDocument, GlobalWorkerOptions } = await import("./pdf.min.mjs");
+  GlobalWorkerOptions.workerSrc = new URL("./pdf.worker.min.mjs", document.baseURI).href;
+  const data = new Uint8Array(await file.arrayBuffer());
+  signal.throwIfAborted();
+  const task = getDocument({ data, useWorkerFetch:false,
+    useSystemFonts:false, disableFontFace:true, isEvalSupported:false, useWasm:false, stopAtErrors:true });
+  let cancel;
+  const stop = new Promise((_, reject) => { cancel = () => reject(signal.reason); });
+  signal.addEventListener("abort", cancel, { once:true });
+  async function extract(){
+    const doc = await task.promise;
+    if (doc.numPages > 30) return null;
+    let text = "";
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      for (const item of content.items) {
+        if (typeof item.str === "string") text += item.str + (item.hasEOL ? "\n" : " ");
+        if (text.length > 200000) return null;
+      }
+      text += "\n";
+    }
+    return lgSuggestedInvoiceTotal(text);
+  }
+  try {
+    return await Promise.race([extract(), stop]);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    await task.destroy();
+  }
+}
+function lgSuggestedInvoiceTotal(text){
+  if (/[€£¥₹]|\b(?:EUR|GBP|CAD|AUD|NZD|MXN|CNY|JPY|INR|CHF)\b|(?:CA?|AU?|NZ|HK|MX)\s*\$/i.test(text)) return null;
+  const priorBalance = /\b(?:previous|prior|outstanding|opening|forward(?:ed)?)\s+balance|\bbalance\s+(?:forward|brought|carried)|\b(?:credits?|payments?)\s+(?:applied|received)\b/i.test(text);
+  const candidates = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(invoice total|total invoice(?: amount)?|total current charges|grand total|total amount due|total due|amount due|total)\s*:?\s*(?:USD\s*)?(\$?\s*[\d,.]+)(?:\s*USD)?\s*$/i.exec(line);
+    if (!match) continue;
+    if (priorBalance && !/^(?:invoice total|total invoice(?: amount)?|total current charges)$/i.test(match[1])) continue;
+    const amount = lgParseMoney(match[2]);
+    if (!amount || Number(amount) <= 0) return null;
+    candidates.add(Number(amount).toFixed(2));
+  }
+  return candidates.size === 1 ? [...candidates][0] : null;
+}
+function lgInvoiceSuggestionHtml(S){
+  if (S.pending || S.busy) return "";
+  if (S.suggestion) return `<button type="button" class="btn sm sec" onclick="lgInvoiceUseSuggestion()">Use PDF total ${esc(fmtMoney(Number(S.suggestion)))}</button>`;
+  return esc(S.suggestionNote || "");
+}
+function lgInvoiceUseSuggestion(){
+  const S = legalInvoices;
+  if (!S.suggestion || !S.file || S.caseId !== lgSelected || S.pending || S.busy) return;
+  S.draft.amount = S.suggestion;
+  const field = $("lg-inv-amount");
+  if (field) field.value = S.suggestion;
+}
+async function lgInvoiceSetFile(input){
+  const S = legalInvoices;
+  if (S.pending || S.busy || S.caseId!==lgSelected) return;
+  const f = input?.files?.[0] || null; S.err = ""; S.status = "";
+  if (S.file && S.file !== f) {
+    S.draft.amount = "";
+    const field = $("lg-inv-amount");
+    if (field) field.value = "";
+  }
+  S.pdfRead?.abort(); S.pdfRead = null;
+  S.suggestion = null; S.suggestionNote = "";
+  if (f && !(f.type==="application/pdf" || /\.pdf$/i.test(f.name))){
+    S.file = null; input.value = ""; S.err = `${f.name} is not a PDF. Invoices must be PDF files.`;
+    lgInvoicesRepaint(S.caseId); return;
+  }
+  S.file = f;
+  const staged = $("lg-inv-staged");
+  if (staged) staged.textContent = S.file ? `Selected: ${S.file.name}` : "";
+  const box = $("lg-inv-suggestion");
+  if (box) box.textContent = "";
+  if (!f || f.size > LG_INV_MAX_BYTES) return;
+  S.suggestionNote = "Reading the invoice total on this device…";
+  if (box) box.textContent = S.suggestionNote;
+  const read = new AbortController();
+  S.pdfRead = read;
+  const timeout = setTimeout(() => read.abort(), 12000);
+  let suggestion = null;
+  try { suggestion = await lgReadInvoiceAmount(f, read.signal); } catch { /* Manual entry stays available. */ }
+  finally { clearTimeout(timeout); }
+  const current = legalInvoices;
+  if (current.pdfRead !== read || current.file !== f || current.caseId !== S.caseId || current.caseId !== lgSelected) return;
+  current.pdfRead = null;
+  current.suggestion = suggestion;
+  current.suggestionNote = suggestion ? "" : "Enter the invoice total manually.";
+  const target = $("lg-inv-suggestion");
+  if (target) target.innerHTML = lgInvoiceSuggestionHtml(current);
+}
+async function lgInvoiceAdd(caseId){
+  const S = legalInvoices;
+  if (S.busy || S.caseId!==caseId || legalComposer.caseId!==caseId) return;
+  S.err = ""; S.status = "";
+  const chk = lgCheckInvoiceAmount(S.draft.amount);
+  if (chk.err){ S.err = chk.err; lgInvoicesRepaint(caseId); return; }
+  const amount = chk.amount;
+  if (!S.pending){
+    if (!S.file){ S.err = "Choose the invoice file first."; lgInvoicesRepaint(caseId); return; }
+    if (S.file.size > LG_INV_MAX_BYTES){ S.err = `${S.file.name} is larger than the 25 MB limit.`; lgInvoicesRepaint(caseId); return; }
+  }
+  const ctx = legalActionContext(caseId);
+  S.busy = true; lgInvoicesRepaint(caseId);
+  if (!S.pending){
+    const file = S.file;
+    const storedName = legalUploadName(file.name);
+    const path = storedName ? legalStoragePath(caseId, storedName) : null;
+    if (!path){ S.busy = false; S.err = "This file name cannot be stored safely. Shorten it and choose it again."; if (ctx.visible()) lgInvoicesRepaint(caseId); return; }
+    const { error } = await sb.storage.from("evidence").upload(path, file, { upsert:false, contentType:file.type||undefined });
+    if (!ctx.sameIdentity()) return;
+    if (error){ S.busy = false; S.err = `Upload failed: ${error.message||"unknown error"}`; if (ctx.visible()) lgInvoicesRepaint(caseId); return; }
+    S.pending = { path, fileName:file.name };
+  }
+  const d = S.draft;
+  const { error } = await sb.rpc("legal_invoice_add", { p_legal_case_id:caseId, p:{
+    storage_path:S.pending.path, file_name:S.pending.fileName, amount,
+    firm:d.firm.trim(), invoice_number:d.number.trim(), invoice_date:d.date, counts_toward_retention:d.counts } });
+  if (!ctx.sameIdentity()) return;
+  S.busy = false;
+  if (error){ S.err = errText(error); if (ctx.visible()) lgInvoicesRepaint(caseId); return; }
+  S.pending = null; S.file = null; S.suggestion = null; S.suggestionNote = ""; S.draft = { amount:"", firm:"", number:"", date:"", counts:true }; S.status = "Invoice recorded.";
+  await lgLoadInvoices(caseId, ctx.visible);
+  lgInvoicesRepaint(caseId);
+}
+// Row actions pass a thunk that calls the update/void/retention RPC, then reload only this card's data.
+async function lgInvoiceMutate(call){
+  const S = legalInvoices, caseId = S.caseId;
+  if (S.busy || !caseId || legalComposer.caseId!==caseId) return;
+  const ctx = legalActionContext(caseId);
+  S.busy = true; S.err = ""; S.status = ""; lgInvoicesRepaint(caseId);
+  const { error } = await call();
+  if (!ctx.sameIdentity()) return;
+  S.busy = false;
+  if (error) S.err = errText(error); else { S.row = null; S.retention = null; S.status = "Saved."; await lgLoadInvoices(caseId, ctx.visible); }
+  lgInvoicesRepaint(caseId);
+}
+function lgInvoiceToggleCounts(id){
+  const i = legalInvoices.rows.find(x=>x.id===id); if (!i) return;
+  return lgInvoiceMutate(() => sb.rpc("legal_invoice_update", { p_id:id, p_expected_updated_at:i.updated_at||i.created_at, p:{ counts_toward_retention:i.counts_toward_retention===false } }));
+}
+function lgInvoiceRowStart(id, mode){
+  const i = legalInvoices.rows.find(x=>x.id===id); if (!i || legalInvoices.busy) return;
+  legalInvoices.row = { id, mode, amount:String(i.amount??""), reason:"" }; legalInvoices.err = ""; legalInvoices.status = "";
+  lgInvoicesRepaint(legalInvoices.caseId);
+}
+function lgInvoiceRowCancel(){ legalInvoices.row = null; legalInvoices.err = ""; lgInvoicesRepaint(legalInvoices.caseId); }
+function lgInvoiceRowSave(){
+  const S = legalInvoices, row = S.row; if (!row) return;
+  const i = S.rows.find(x=>x.id===row.id); if (!i) return;
+  if (row.mode==="void"){
+    const reason = row.reason.trim();
+    if (!reason){ S.err = "Enter a reason for voiding this invoice."; lgInvoicesRepaint(S.caseId); return; }
+    return lgInvoiceMutate(() => sb.rpc("legal_invoice_void", { p_id:row.id, p_reason:reason }));
+  }
+  const chk = lgCheckInvoiceAmount(row.amount);
+  if (chk.err){ S.err = chk.err; lgInvoicesRepaint(S.caseId); return; }
+  const amount = chk.amount;
+  return lgInvoiceMutate(() => sb.rpc("legal_invoice_update", { p_id:row.id, p_expected_updated_at:i.updated_at||i.created_at, p:{ amount } }));
+}
+function lgRetentionStart(){
+  const S = legalInvoices; if (S.busy) return;
+  S.retention = String(S.spend?.retention_amount ?? "75000"); S.err = ""; S.status = "";
+  lgInvoicesRepaint(S.caseId);
+}
+function lgRetentionCancel(){ legalInvoices.retention = null; legalInvoices.err = ""; lgInvoicesRepaint(legalInvoices.caseId); }
+function lgRetentionSave(caseId){
+  const S = legalInvoices;
+  const amount = lgParseMoney(S.retention);
+  if (amount===null){ S.err = "Enter the retention as a number, e.g. 75000."; lgInvoicesRepaint(caseId); return; }
+  return lgInvoiceMutate(() => sb.rpc("legal_set_retention", { p_id:caseId, p_amount:Number(amount) }));
+}
+// ---- end legal invoices ----
 function setLegalPreviewBackgroundInert(active){
   if (!active){
     document.querySelectorAll('[data-legal-preview-inert="1"]').forEach(el=>{ el.inert=false; delete el.dataset.legalPreviewInert; });
@@ -3986,6 +4528,19 @@ async function setCaseRequesterFromDetail(caseId, employeeId){
   cdRequesterRepaint(c);
 }
 
+// PSP item 5 B3: the assigned handler's first open acknowledges the case
+// (server emails the reporter once). Fire-and-forget: never render()s, and the
+// RPC is idempotent, so a lost response just retries on the next open.
+const ackRequested = new Set();
+function maybeAcknowledgeCase(c){
+  if (!incidentAcknowledgmentEnabled) return;
+  const me = myWorkEmployeeId();
+  if(!c || c.intake_type !== "incident" || c.acknowledged_at || c.external || !me || c.handler_id !== me) return;
+  if(ackRequested.has(c.id)) return;
+  ackRequested.add(c.id);
+  Promise.resolve(sb.rpc("acknowledge_case",{p_case_id:c.id}))
+    .then(res => { if(res && res.error) ackRequested.delete(c.id); }, () => ackRequested.delete(c.id));
+}
 async function renderCaseDetailInto(el, id){
   const epoch = sessionEpoch;
   const detailResults = await Promise.all([
@@ -4012,6 +4567,7 @@ async function renderCaseDetailInto(el, id){
   if (epoch !== sessionEpoch || selected !== id || !el.isConnected) return;  // stale-paint/session guard
   caseAllegs = allegs || [];   // used by the close modal gate
   if(!c){ el.innerHTML=`<button class="back" onclick="closeCase()">← Back</button><div class="card"><div class="banner warn">This case isn't available to you.</div></div>`; return; }
+  maybeAcknowledgeCase(c);
   caseFileTitles = {caseId:id, rows:titlesResult.data||[], error:titlesResult.error?"Upload titles are unavailable until the portal update is applied.":"", edits:new Map()};
   caseLocationEdit = {caseId:id, open:false, value:c.location||"", busy:false, error:""};
   const thread=ensureMessageThread(id,null);
